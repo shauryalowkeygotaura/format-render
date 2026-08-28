@@ -1,0 +1,15 @@
+setup:
+  # Reuses the creative-studio Doppler project rather than taking an eleventh
+  # project slot: the account is at the 10-project cap, and creative-studio
+  # already holds PEXELS_API_KEY (the same stock-footage key this needs).
+  # Same pattern as football-shorts-autopilot reusing youtube-title-autoresearch
+  # and jio-outbound reusing dental-receptionist.
+  #
+  # Without this file `broll.enabled()` reported {'pexels': False} no matter how
+  # valid the key was, because nothing injected it into the process. Stock video
+  # b-roll silently stayed off and every beat fell through to a Ken Burns push
+  # on a still, which is what made the asteroid render visually monotonous.
+  #
+  # Run renders as: doppler run -- python -m formatrender ... --broll
+  project: creative-studio
+  config: dev

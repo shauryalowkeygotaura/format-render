@@ -1,0 +1,16 @@
+# Free stack only. No paid API anywhere in this pipeline.
+edge-tts>=6.1        # neural TTS, no key, replaces ElevenLabs. Gives word
+                     # timings, which the shorts captions depend on.
+Pillow>=10.0         # thumbnail compositing
+requests>=2.31       # Wikimedia Commons, and optional Pixabay/Pexels
+
+# System binaries required: ffmpeg, ffprobe (libass build, for burned captions)
+
+# --- optional, all free, all degrade cleanly when absent -------------------
+# kokoro-onnx        # local Apache-2.0 TTS upgrade (~310MB model), FR_TTS_PROVIDER=kokoro
+#                    # NOTE: emits no word timings -> shorts lose burned captions
+# soundfile          # required by the kokoro path only
+#
+# PIXABAY_API_KEY    # free stock video b-roll   https://pixabay.com/api/docs/
+# PEXELS_API_KEY     # free stock video b-roll   https://www.pexels.com/api/
+# YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN  # publish (via Doppler)
