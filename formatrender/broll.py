@@ -80,7 +80,9 @@ def _pexels_key() -> str | None:
     return next(_key_cycle)
 
 
-def _search_pixabay(term: str, size: tuple[int, int]) -> str | None:
+def _search_pixabay(term: str, size: tuple[int, int],
+                    exclude: frozenset[str] = frozenset()) -> tuple[str, str] | None:
+    """(url, clip_id) or None. `exclude` holds clip_ids already used."""
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
         return None
@@ -100,15 +102,22 @@ def _search_pixabay(term: str, size: tuple[int, int]) -> str | None:
             continue
         if int(hit.get("duration", 0) or 0) < MIN_CLIP_SEC:
             continue
+        clip_id = f"pixabay:{hit.get('id')}"
+        # Skip the WHOLE hit, not just one rendition: the same clip served at a
+        # different quality is still the same footage on screen.
+        if clip_id in exclude:
+            continue
         videos = hit.get("videos") or {}
         for quality in ("large", "medium", "small"):
             v = videos.get(quality) or {}
             if v.get("url") and int(v.get("width", 0) or 0) >= size[0] // 2:
-                return v["url"]
+                return v["url"], clip_id
     return None
 
 
-def _search_pexels(term: str, size: tuple[int, int]) -> str | None:
+def _search_pexels(term: str, size: tuple[int, int],
+                   exclude: frozenset[str] = frozenset()) -> tuple[str, str] | None:
+    """(url, clip_id) or None. `exclude` holds clip_ids already used."""
     key = _pexels_key()
     if not key:
         return None
@@ -129,59 +138,51 @@ def _search_pexels(term: str, size: tuple[int, int]) -> str | None:
             continue
         if int(vid.get("duration", 0) or 0) < MIN_CLIP_SEC:
             continue
+        clip_id = f"pexels:{vid.get('id')}"
+        # Dedupe on the VIDEO id, not the per-resolution link. Keyed on the link
+        # the same footage walks back in through a different rendition URL.
+        # `continue`, not `break`: try the next video, do not abandon the search.
+        if clip_id in exclude:
+            continue
         files = sorted((f for f in vid.get("video_files", [])
                         if isinstance(f, dict) and f.get("link")),
                        key=lambda f: -int(f.get("width", 0) or 0))
         for f in files:
             if int(f.get("width", 0) or 0) >= size[0] // 2:
-                return f["link"]
+                return f["link"], clip_id
     return None
 
 
-def _download(url: str, dest: Path) -> bool:
-    try:
-        with requests.get(url, timeout=(15, 60), stream=True) as r:
-            if r.status_code != 200:
-                return False
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(dest, "wb") as fh:
-                for chunk in r.iter_content(1 << 16):
-                    fh.write(chunk)
-    except (requests.RequestException, OSError):
-        return False
-    return dest.exists() and dest.stat().st_size > 50_000
-
-
-def _conform(src: Path, out: Path, duration: float, size: tuple[int, int]) -> Path | None:
-    """Loop/trim to the narration length, scale-crop to frame, strip audio."""
-    w, h = size
-    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-          f"crop={w}:{h},fps={config.FPS},format=yuv420p")
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(src),
-         "-t", f"{duration:.3f}", "-vf", vf, "-an",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
-        capture_output=True)
-    return out if proc.returncode == 0 and out.exists() else None
-
-
 def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
-               topic: str = "") -> Path | None:
-    """A conformed stock clip, or None so the caller uses a Ken-Burns still."""
+               topic: str = "", used_ids: set[str] | None = None) -> Path | None:
+    """A conformed stock clip, or None so the caller uses a Ken-Burns still.
+
+    `used_ids` holds the clip ids already placed in THIS video. It is read to
+    skip repeats and mutated on SUCCESS. Without it, related cues ("aurora",
+    "polar horizon", "high-latitude") all rank the same clip first and one clip
+    was reused 15 times in a single render, so the video changed shot every 4
+    seconds while showing identical footage.
+    """
     flags = enabled()
     if not any(flags.values()):
         return None
     term = search_term(cue, topic)
-    url = None
+    seen = frozenset(used_ids or ())
+    found = None
     if flags["pixabay"]:
-        url = _search_pixabay(term, size)
-    if not url and flags["pexels"]:
-        url = _search_pexels(term, size)
-    if not url:
+        found = _search_pixabay(term, size, seen)
+    if not found and flags["pexels"]:
+        found = _search_pexels(term, size, seen)
+    if not found:
         return None
+    url, clip_id = found
     raw = dest.with_suffix(".src.mp4")
     if not _download(url, raw):
         return None
     clip = _conform(raw, dest, duration, size)
     raw.unlink(missing_ok=True)
+    # Record only AFTER the clip actually exists. Marking it used earlier would
+    # blacklist footage that never reached the video because a download failed.
+    if clip is not None and used_ids is not None:
+        used_ids.add(clip_id)
     return clip

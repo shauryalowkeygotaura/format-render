@@ -141,6 +141,8 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
 
     parts: list[Path] = []
     renders: list[BeatRender] = []
+    # Stock clip ids already used ANYWHERE in this video.
+    used_clip_ids: set[str] = set(state.get('_used_clip_ids', []))
     cursor = 0.0
     found_count = 0
 
@@ -184,7 +186,8 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             clip = None
             if use_broll:
                 clip = broll.fetch_clip(shot_cue, work / "shots" / f"{slug}_{k:02d}_b.mp4",
-                                        seg, size, topic=brief.topic)
+                                        seg, size, topic=brief.topic,
+                                        used_ids=used_clip_ids)
             if clip is None:
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,
@@ -244,6 +247,9 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                           for w, s, e in narration.word_timings]))
         state[slug] = {"start": cursor, "end": cursor + dur, "image": still_ref,
                        "image_found": first_ok, "word_timings": narration.word_timings}
+        # Persist so a RESUMED render does not re-use clips that cached
+        # segments already show.
+        state["_used_clip_ids"] = sorted(used_clip_ids)
         state_path.write_text(json.dumps(state), encoding="utf-8")
         cursor += dur
         if verbose:
