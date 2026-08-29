@@ -37,6 +37,10 @@ class Brief:
     topic: str
     format_slug: str
     description: str = ""
+    # Purpose-written thumbnail overlay. Defaulted, so it must sit with the
+    # other defaulted fields: a default before a non-default field is a
+    # dataclass TypeError at import, which compile() cannot catch.
+    thumbnail_text: str = ""
     hashtags: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     substance: list[dict] = field(default_factory=list)
@@ -124,6 +128,7 @@ def load_brief(ref: str, *, force: bool = False) -> Brief:
     return Brief(
         title=raw.get("title") or path.stem,
         hook=hook,
+        thumbnail_text=(raw.get("thumbnail_text") or "").strip(),
         beats=beats,
         topic=raw.get("topic") or "",
         format_slug=raw.get("format_slug") or "",

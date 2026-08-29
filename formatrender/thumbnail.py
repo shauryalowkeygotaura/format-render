@@ -65,6 +65,25 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+def choose_overlay(title: str, overlay_text: str = "", max_words: int = 4) -> str:
+    """What actually goes on the thumbnail.
+
+    Prefers purpose-written text from the brief. Deriving the overlay FROM the
+    title, which is what _punchy does, structurally guarantees the thumbnail
+    repeats the title, and repeating the title is the most common thumbnail
+    mistake there is: the viewer has already read it, so it adds nothing and
+    closes the curiosity gap it should be opening.
+
+    It is also how "Every Asteroid That Could Actually Hit Earth Explained"
+    became the overlay "ASTEROID THAT COULD ACTUALLY", a truncated fragment
+    whose payload words were precisely the ones cut off.
+    """
+    t = (overlay_text or "").strip()
+    if t:
+        return " ".join(t.split()[:max_words]).upper()
+    return _punchy(title, max_words)
+
+
 def _punchy(title: str, max_words: int = 4) -> str:
     """Strip a title down to what is legible at thumbnail scale.
 
@@ -293,14 +312,15 @@ def _correct(path: Path, targets: dict, analyze) -> dict:
     return report
 
 
-def build(title: str, still: Path | None, spec: dict, out: Path) -> dict:
+def build(title: str, still: Path | None, spec: dict, out: Path,
+          overlay_text: str = "") -> dict:
     """Composite a thumbnail to the format's measured spec and verify it."""
     targets = _targets(spec)
     colors = _hexes(spec)
     canvas = _base_canvas(config.THUMB_SIZE, colors)
     canvas = _place(canvas, still, targets["layout"], targets["subject_count"])
 
-    punch = _punchy(title)
+    punch = choose_overlay(title, overlay_text)
     canvas = _header_band(canvas, punch) if targets["header"] else _big_text(canvas, punch)
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -367,7 +387,8 @@ def _layout_advice(got: str, want: str) -> str:
             + _LAYOUT_HINT.get(want, "pick a still whose composition matches."))
 
 
-def build_best(title: str, stills: list[Path], spec: dict, out: Path) -> dict:
+def build_best(title: str, stills: list[Path], spec: dict, out: Path,
+               overlay_text: str = "") -> dict:
     """Build from every candidate still and keep the one that matches best.
 
     Which still you start from changes the score more than any amount of
@@ -381,11 +402,11 @@ def build_best(title: str, stills: list[Path], spec: dict, out: Path) -> dict:
 
     stills = [Path(p) for p in stills if p and Path(p).exists()]
     if not stills:
-        return build(title, None, spec, out)
+        return build(title, None, spec, out, overlay_text)
     # Without the analyzer there is no score to choose on, so trying every
     # still would be N full composites to pick arbitrarily.
     if len(stills) == 1 or _analyzer() is None:
-        return build(title, stills[0], spec, out)
+        return build(title, stills[0], spec, out, overlay_text)
 
     scratch = Path(tempfile.mkdtemp(prefix="fr_cand_", dir=str(out.parent)))
     best_path, best_still, best_score = None, None, -1.0
@@ -398,7 +419,7 @@ def build_best(title: str, stills: list[Path], spec: dict, out: Path) -> dict:
             # would be scored against the first one's enhanced pixels.
             cand = scratch / f"{i:02d}_{s.stem}.jpg"
             try:
-                res = build(title, s, spec, cand)
+                res = build(title, s, spec, cand, overlay_text)
             except (OSError, ValueError) as e:
                 tried.append({"still": s.name, "matches": f"skipped ({e})"})
                 continue
@@ -410,7 +431,7 @@ def build_best(title: str, stills: list[Path], spec: dict, out: Path) -> dict:
                 best_path, best_still, best_score = cand, s, score
 
         if best_path is None:
-            return build(title, stills[0], spec, out)
+            return build(title, stills[0], spec, out, overlay_text)
 
         # Reuse the winning composite instead of rebuilding it; the correction
         # loop is the expensive part and it has already run on this file.

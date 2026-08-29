@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import broll, captions, config, visuals, voice
+from . import broll, captions, config, shots, visuals, voice
 from .brief import Brief
 
 
@@ -164,21 +164,74 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         narration = voice.narrate(text, work / "audio", slug)
         dur = max(narration.duration_sec, 1.0)
 
-        still, ok = visuals.fetch_still(
-            cue, work / "img" / f"{slug}.jpg", size,
-            subject=brief.topic, palette=palette)
-        found_count += 1 if ok else 0
+        # One beat used to be ONE still held for the whole beat, which on a real
+        # render meant a single photograph on screen for 29 seconds against a
+        # 3-to-5 second target. Cut it into shots instead, each with its own cue
+        # taken from the narration it covers, so the picture tracks what is
+        # being said and a bad match costs seconds rather than half a minute.
+        n_shots = shots.plan(dur, words=len(text.split()))
+        cue_list = shots.shot_cues(text, cue, n_shots)
+        shot_files: list[Path] = []
+        seen_digests: set[str] = set()
+        first_still: Path | None = None
+        first_ok = False
 
-        # Motion when a stock provider is keyed AND has something on-topic;
-        # otherwise a Ken-Burns push on the real photograph, which is the
-        # better default anyway (see broll.py).
-        clip = None
-        if use_broll:
-            clip = broll.fetch_clip(cue, work / f"{slug}_broll.mp4", dur, size,
-                                    topic=brief.topic)
-        if clip is None:
-            clip = visuals.ken_burns(still, work / f"{slug}_clip.mp4", dur, size,
-                                     zoom_in=(i % 2 == 0))
+        for k, shot_cue in enumerate(cue_list):
+            seg = dur / n_shots
+            shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
+            shot_out.parent.mkdir(parents=True, exist_ok=True)
+
+            clip = None
+            if use_broll:
+                clip = broll.fetch_clip(shot_cue, work / "shots" / f"{slug}_{k:02d}_b.mp4",
+                                        seg, size, topic=brief.topic)
+            if clip is None:
+                still, shot_ok = visuals.fetch_still(
+                    shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,
+                    subject=brief.topic, palette=palette)
+                # Repeating a picture INSIDE one beat looks worse than the beat
+                # having fewer shots, and Commons returns the same file for
+                # related queries often enough that this fires in practice.
+                d = shots.digest(still)
+                if d in seen_digests and len(shot_files) > 0:
+                    continue
+                seen_digests.add(d)
+                if first_still is None:
+                    first_still, first_ok = still, shot_ok
+                clip = visuals.ken_burns(still, shot_out, seg, size,
+                                         zoom_in=((i + k) % 2 == 0))
+            shot_files.append(clip)
+
+        if not shot_files:
+            # Every shot deduped away: fall back to one still for the beat
+            # rather than emitting a beat with no picture at all.
+            fb_still, first_ok = visuals.fetch_still(
+                cue, work / "img" / f"{slug}.jpg", size,
+                subject=brief.topic, palette=palette)
+            first_still = fb_still
+            shot_files = [visuals.ken_burns(fb_still, work / "shots" / f"{slug}_00.mp4",
+                                            dur, size, zoom_in=(i % 2 == 0))]
+
+        # Resolve what this beat actually got BEFORE counting it. first_still
+        # stays None when stock video supplied every shot: there is no still to
+        # record, but the beat did get real footage, so counting it as a
+        # gradient fallback would understate real_image_ratio and print
+        # "gradient" for a beat that is nothing of the sort.
+        if first_still is None:
+            still_ref = ""          # no still exists; not an image path
+            first_ok = True         # stock footage IS real imagery
+        else:
+            still_ref = str(first_still)
+        found_count += 1 if first_ok else 0
+
+        if len(shot_files) == 1:
+            clip = shot_files[0]
+        else:
+            # Shots are cut to dur/n_shots each, so the track can drift a frame
+            # or two from the audio. _mux uses -shortest, which trims rather
+            # than desyncs.
+            clip = shots.concat(shot_files, work / f"{slug}_track.mp4",
+                                work / "shots" / f"{slug}_list.txt")
         _mux(clip, narration.audio_path, muxed)
         parts.append(muxed)
 
@@ -186,16 +239,16 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         # timeline or every caption clusters at zero.
         renders.append(BeatRender(
             index=i, start=cursor, end=cursor + dur, narration=text,
-            image=str(still), image_found=ok,
+            image=still_ref, image_found=first_ok,
             word_timings=[(w, s + cursor, e + cursor)
                           for w, s, e in narration.word_timings]))
-        state[slug] = {"start": cursor, "end": cursor + dur, "image": str(still),
-                       "image_found": ok, "word_timings": narration.word_timings}
+        state[slug] = {"start": cursor, "end": cursor + dur, "image": still_ref,
+                       "image_found": first_ok, "word_timings": narration.word_timings}
         state_path.write_text(json.dumps(state), encoding="utf-8")
         cursor += dur
         if verbose:
-            mark = "commons" if ok else "gradient"
-            print(f"  [{i+1}/{len(segments)}] {slug}: {dur:5.1f}s  {mark}")
+            mark = "footage" if first_ok else "gradient"
+            print(f"  [{i+1}/{len(segments)}] {slug}: {dur:5.1f}s  {len(shot_files)} shots ({dur/max(len(shot_files),1):.1f}s each)  {mark}")
 
     if not parts:
         raise ComposeError("nothing rendered")

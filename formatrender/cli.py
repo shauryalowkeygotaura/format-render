@@ -124,14 +124,14 @@ def cmd_thumb(args) -> int:
     out = out_dir / "thumbnail.jpg"
 
     if args.still:
-        res = thumbnail.build(b.title, Path(args.still), spec, out)
+        res = thumbnail.build(b.title, Path(args.still), spec, out, b.thumbnail_text)
     else:
         stills = _render_stills(out_dir)
         if args.best_still and len(stills) > 1:
             print(f"  trying {len(stills)} stills against the format spec")
-            res = thumbnail.build_best(b.title, stills, spec, out)
+            res = thumbnail.build_best(b.title, stills, spec, out, b.thumbnail_text)
         else:
-            res = thumbnail.build(b.title, stills[0] if stills else None, spec, out)
+            res = thumbnail.build(b.title, stills[0] if stills else None, spec, out, b.thumbnail_text)
     _print_thumb(res)
     return 0
 
@@ -184,9 +184,9 @@ def cmd_render(args) -> int:
     stills = [Path(r.image) for r in result.beats if r.image_found]
     if args.best_still and len(stills) > 1:
         print(f"\n  trying {len(stills)} stills against the format spec")
-        thumb = thumbnail.build_best(b.title, stills, spec, thumb_out)
+        thumb = thumbnail.build_best(b.title, stills, spec, thumb_out, b.thumbnail_text)
     else:
-        thumb = thumbnail.build(b.title, result.hero_still, spec, thumb_out)
+        thumb = thumbnail.build(b.title, result.hero_still, spec, thumb_out, b.thumbnail_text)
     _print_thumb(thumb)
 
     clips: list[dict] = []
