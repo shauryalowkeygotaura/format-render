@@ -10,6 +10,7 @@ and re-downloading imagery it already has.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -296,15 +297,30 @@ def write_manifest(brief: Brief, result: RenderResult, thumb: dict,
 
     # Repeated stills are why the asteroid render showed one Ceres image for
     # its first 30 seconds. Cheap to detect here, and invisible otherwise.
-    images = [b.image for b in result.beats if b.image]
-    if images:
-        unique = len(set(images))
-        if unique < len(images):
-            worst = max(set(images), key=images.count)
+    # Compare CONTENT, not filenames. compose() gives the hook beat[0]'s visual
+    # cue, so the hook and the first beat fetch the same picture into two
+    # different files. A filename comparison called that "5 distinct stills"
+    # and stayed silent while the video opened on the same image twice, which
+    # is precisely the defect this check exists to catch.
+    digests: dict[str, list[str]] = {}
+    for b in result.beats:
+        if not b.image:
+            continue
+        f = Path(b.image)
+        try:
+            key = hashlib.sha1(f.read_bytes()).hexdigest()
+        except OSError:
+            key = str(f)  # unreadable: fall back to the path so it still counts
+        digests.setdefault(key, []).append(f.name)
+    if digests:
+        total = sum(len(v) for v in digests.values())
+        dupes = {k: v for k, v in digests.items() if len(v) > 1}
+        if dupes:
+            worst = max(dupes.values(), key=len)
             blockers.append(
-                f"imagery repeats: {len(images)} beats share {unique} distinct "
-                f"stills, and '{Path(worst).name}' is used {images.count(worst)} "
-                f"times. Consecutive reuse reads as a frozen video.")
+                f"imagery repeats: {total} beats use only {len(digests)} distinct "
+                f"images, and {' and '.join(worst)} are byte-identical. "
+                f"Reuse reads as a frozen video.")
 
     for b in blockers:
         # First items, and shouted, because an upload step scanning this list

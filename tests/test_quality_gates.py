@@ -191,3 +191,32 @@ def test_force_still_renders_a_hookless_brief():
 def test_a_brief_with_a_hook_passes():
     p = _brief_file(tempfile.mkdtemp(), hook="In 2008 a rock hit Sudan with six hours warning.")
     assert load_brief(str(p)).hook.startswith("In 2008")
+
+
+def test_identical_images_under_different_names_are_caught(tmp_path):
+    """compose() gives the hook beat[0]'s visual cue, so the two fetch the same
+    picture into different files. A filename comparison reported "5 distinct
+    stills" and stayed silent while the video opened on the same image twice.
+    """
+    same = b"\x89PNG-pretend-this-is-a-real-image" * 40
+    a, b_ = tmp_path / "hook.jpg", tmp_path / "beat0.jpg"
+    a.write_bytes(same)
+    b_.write_bytes(same)
+    c = tmp_path / "beat1.jpg"
+    c.write_bytes(b"a genuinely different image" * 40)
+
+    m = _manifest(tmp_path, title="An Honest Title", seconds=300.0,
+                  images=[str(a), str(b_), str(c)], thumb={})
+    blockers = [x for x in m["upload_checklist"] if x.startswith("BLOCKER:")]
+    assert any("byte-identical" in x for x in blockers), blockers
+
+
+def test_distinct_images_do_not_trip_the_duplicate_check(tmp_path):
+    imgs = []
+    for i in range(4):
+        f = tmp_path / f"b{i}.jpg"
+        f.write_bytes(f"distinct image {i}".encode() * 40)
+        imgs.append(str(f))
+    m = _manifest(tmp_path, title="An Honest Title", seconds=300.0,
+                  images=imgs, thumb={})
+    assert not [x for x in m["upload_checklist"] if "byte-identical" in x]
