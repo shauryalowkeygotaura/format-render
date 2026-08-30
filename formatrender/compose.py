@@ -187,7 +187,8 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             if use_broll:
                 clip = broll.fetch_clip(shot_cue, work / "shots" / f"{slug}_{k:02d}_b.mp4",
                                         seg, size, topic=brief.topic,
-                                        used_ids=used_clip_ids)
+                                        used_ids=used_clip_ids,
+                                        want_face=(k % broll.FACE_EVERY_NTH_SHOT == 1))
             if clip is None:
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,

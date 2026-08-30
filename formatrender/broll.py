@@ -26,6 +26,7 @@ import itertools
 import os
 import re
 import subprocess
+import zlib
 from pathlib import Path
 
 import requests
@@ -59,6 +60,18 @@ MIN_YMAX = 130.0
 # Each retry costs another download and conform, so this is capped. Measured
 # rate of dead clips was 2 in 39 (5%), so 4 attempts is ample headroom.
 MAX_CLIP_ATTEMPTS = 4
+
+# Human presence. Faces hold attention in a way landscapes do not, and a
+# faceless-channel video built entirely from scenery reads as a screensaver.
+# Not every shot: a solar-storm explainer with a person in all forty shots is
+# just as wrong. Every other shot targets a human, so roughly half the video
+# has someone in it.
+FACE_EVERY_NTH_SHOT = 2
+# Appended to the query, because a term like "collapse solar storms" will never
+# return a person no matter how many results are fetched. The word is chosen
+# deterministically from the cue so neighbouring shots do not issue the same
+# query and collide on the same footage.
+_PEOPLE_WORDS = ("person", "man", "woman", "people", "worker", "engineer")
 _key_cycle: itertools.cycle | None = None
 
 # Words that name no picture. A stock query built from verbs, connectives or
@@ -88,7 +101,7 @@ def enabled() -> dict[str, bool]:
             "pexels": bool(os.environ.get("PEXELS_API_KEY", "").strip())}
 
 
-def search_term(cue: str, topic: str = "") -> str:
+def search_term(cue: str, topic: str = "", want_face: bool = False) -> str:
     """A query a stock library can actually match.
 
     Stock libraries index concrete, generic concepts: "aurora", "power grid",
@@ -122,7 +135,17 @@ def search_term(cue: str, topic: str = "") -> str:
         (proper if w[0].isupper() else generic).append(low)
     # Generic concepts first; proper nouns only when there is nothing else, so a
     # cue made entirely of names still produces a query rather than an empty one.
-    parts = (generic or proper)[:2]
+    # One cue word instead of two when a person is wanted, to leave room for the
+    # people word and the topic anchor inside the four-word cap.
+    parts = (generic or proper)[:1 if want_face else 2]
+
+    if want_face:
+        # crc32, NOT hash(): Python salts string hashing per process, so hash()
+        # would pick a different word every run and the same brief would
+        # render different footage each time.
+        word = _PEOPLE_WORDS[zlib.crc32((cue or "").encode()) % len(_PEOPLE_WORDS)]
+        if word not in parts:
+            parts.append(word)
 
     for w in _topic_anchor(topic):
         if w not in parts:
@@ -295,8 +318,47 @@ def _unwatchable(stats: tuple[float, float] | None) -> bool:
     return yavg < MIN_YAVG and ymax < MIN_YMAX
 
 
+def _has_face(path: Path) -> bool | None:
+    """Whether a frame of this clip contains a face. None when undecidable.
+
+    None matters: a missing OpenCV, an undecodable clip or a missing cascade
+    must not be read as "no face", or every candidate gets rejected and the
+    shot falls through to a gradient. Undecidable is treated as acceptable
+    everywhere it is used, the same rule as _unwatchable.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+    try:
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        # Sample the middle rather than frame zero, which is often a fade.
+        if total > 2:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            return None
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cascade = cv2.CascadeClassifier(cascade_path)
+        if cascade.empty():
+            return None
+        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(grey, scaleFactor=1.1, minNeighbors=5,
+                                         minSize=(60, 60))
+        return len(faces) > 0
+    except Exception:
+        # Detection is a preference, never a hard requirement. Any failure here
+        # must leave the clip usable.
+        return None
+
+
 def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
-               topic: str = "", used_ids: set[str] | None = None) -> Path | None:
+               topic: str = "", used_ids: set[str] | None = None,
+               want_face: bool = False) -> Path | None:
     """A conformed stock clip, or None so the caller uses a Ken-Burns still.
 
     `used_ids` holds the clip ids already placed in THIS video. It is read to
@@ -308,10 +370,23 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
     flags = enabled()
     if not any(flags.values()):
         return None
-    term = search_term(cue, topic)
+    term = search_term(cue, topic, want_face)
     raw = dest.with_suffix(".src.mp4")
     rejected: set[str] = set()
-    fallback: tuple[Path, str] | None = None
+    # Best clip that was usable but not ideal. rank 1 beats rank 2, so a bright
+    # shot with no face is preferred over a dim one when nothing ideal turns up.
+    reserve: tuple[int, Path, str] | None = None
+
+    def _hold(rank: int, clip: Path, clip_id: str) -> None:
+        nonlocal reserve
+        if reserve is not None and reserve[0] <= rank:
+            return
+        keep = dest.with_suffix(f".hold{rank}.mp4")
+        try:
+            clip.replace(keep)
+        except OSError:
+            return
+        reserve = (rank, keep, clip_id)
 
     for _ in range(MAX_CLIP_ATTEMPTS):
         seen = frozenset(used_ids or ()) | rejected
@@ -332,25 +407,22 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
             rejected.add(clip_id)
             continue
         if _unwatchable(_frame_stats(clip)):
-            # Keep the first dim clip in reserve: a dark shot still beats the
-            # flat gradient card the caller falls back to.
-            if fallback is None:
-                keep = clip.with_suffix(".dim.mp4")
-                try:
-                    clip.replace(keep)
-                    fallback = (keep, clip_id)
-                except OSError:
-                    pass
+            _hold(2, clip, clip_id)
             rejected.add(clip_id)
             continue
-        # Record only AFTER the clip exists and is worth showing. Marking it
+        # None means undecidable, which is accepted rather than rejected.
+        if want_face and _has_face(clip) is False:
+            _hold(1, clip, clip_id)
+            rejected.add(clip_id)
+            continue
+        # Recorded only once the clip exists AND is worth showing. Marking it
         # earlier would blacklist footage that never reached the video.
         if used_ids is not None:
             used_ids.add(clip_id)
         return clip
 
-    if fallback is not None:
-        keep, clip_id = fallback
+    if reserve is not None:
+        _, keep, clip_id = reserve
         try:
             keep.replace(dest)
         except OSError:
