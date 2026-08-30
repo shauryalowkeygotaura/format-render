@@ -238,7 +238,16 @@ def cmd_render(args) -> int:
     # tell that nothing new was being read. Using the frames instead moved
     # brightness 0.059 -> 0.391 and contrast 0.194 -> 0.301, both onto
     # target, with zero correction passes instead of three.
-    if len(stills) > 1 and (args.best_still or getattr(args, "broll", False)):
+    # A levels format gets the banded layout, which does not depend on the
+    # scorer picking a good frame. Left unwired, the scorer chose a sunny
+    # traffic cone for a blackout video and scored it 4/4: every trait
+    # satisfied, subject irrelevant. The banded layout cannot make that
+    # mistake because it uses one frame per LEVEL by construction.
+    if "levels" in (b.format_slug or "") and len(stills) > 1:
+        print("  banded levels thumbnail from " + str(min(len(stills), 8)) + " beats")
+        thumb = thumbnail.build_levels(b.title, stills[:8], thumb_out,
+                                       overlay_text=b.thumbnail_text)
+    elif len(stills) > 1 and (args.best_still or getattr(args, "broll", False)):
         print(f"\n  trying {len(stills)} stills against the format spec")
         thumb = thumbnail.build_best(b.title, stills, spec, thumb_out, b.thumbnail_text)
     elif stills:
