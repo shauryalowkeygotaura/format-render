@@ -224,9 +224,18 @@ def cmd_render(args) -> int:
         # shows, and the Commons stills are leftovers from beats that found none.
         stills = _frames_from_video(result.video_path, result.beats,
                                     out_dir / "thumbframes") + stills
-    if args.best_still and len(stills) > 1:
+    # hero_still is a Commons still. With --broll most beats have no still
+    # at all, so falling back to it ignored every footage frame gathered
+    # above and rebuilt from the same grey leftover: two renders with wholly
+    # different footage scored an identical brightness 0.059, which is the
+    # tell that nothing new was being read. Using the frames instead moved
+    # brightness 0.059 -> 0.391 and contrast 0.194 -> 0.301, both onto
+    # target, with zero correction passes instead of three.
+    if len(stills) > 1 and (args.best_still or getattr(args, "broll", False)):
         print(f"\n  trying {len(stills)} stills against the format spec")
         thumb = thumbnail.build_best(b.title, stills, spec, thumb_out, b.thumbnail_text)
+    elif stills:
+        thumb = thumbnail.build(b.title, stills[0], spec, thumb_out, b.thumbnail_text)
     else:
         thumb = thumbnail.build(b.title, result.hero_still, spec, thumb_out, b.thumbnail_text)
     _print_thumb(thumb)
