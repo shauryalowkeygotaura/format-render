@@ -44,6 +44,21 @@ MIN_CLIP_SEC = 4
 # flat gradient: 9 consecutive gradient shots in one beat. Measured against the
 # live API, per_page=80 returns 76-80 usable clips for the same cues.
 SEARCH_POOL = 80
+
+# A clip is rejected as unwatchable only when it is dim AND has no highlights.
+# Calibrated against real footage from a solar-storms render, because the naive
+# "too dark" rule throws away the best shots in the video:
+#   aurora over a horizon   YAVG 121  YMAX 245  <- the single best frame
+#   sun disc on black space YAVG  40  YMAX 255  <- dim average, perfectly good
+#   dead night frame        YAVG  16  YMAX 107  <- reject
+#   dead grey frame         YAVG  23  YMAX  89  <- reject
+# Mean luminance alone cannot separate the second row from the last two; the
+# peak is what says whether anything is actually visible in the frame.
+MIN_YAVG = 25.0
+MIN_YMAX = 130.0
+# Each retry costs another download and conform, so this is capped. Measured
+# rate of dead clips was 2 in 39 (5%), so 4 attempts is ample headroom.
+MAX_CLIP_ATTEMPTS = 4
 _key_cycle: itertools.cycle | None = None
 
 # Words that name no picture. A stock query built from verbs, connectives or
@@ -246,6 +261,40 @@ def _conform(src: Path, out: Path, duration: float, size: tuple[int, int]) -> Pa
     return out if proc.returncode == 0 and out.exists() else None
 
 
+def _frame_stats(path: Path) -> tuple[float, float] | None:
+    """(mean, peak) luminance of one frame, or None if it cannot be measured.
+
+    Samples a frame a little way in rather than the first, which is often a
+    fade from black and would condemn a perfectly good clip.
+    """
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+         "-vf", r"select='eq(n\,15)',signalstats,metadata=print",
+         "-frames:v", "1", "-f", "null", "-"],
+        capture_output=True, text=True)
+    blob = (proc.stderr or "") + (proc.stdout or "")
+    avg = re.search(r"YAVG=([0-9.]+)", blob)
+    peak = re.search(r"YMAX=([0-9.]+)", blob)
+    if not avg or not peak:
+        return None
+    try:
+        return float(avg.group(1)), float(peak.group(1))
+    except ValueError:
+        return None
+
+
+def _unwatchable(stats: tuple[float, float] | None) -> bool:
+    """A frame with nothing visible in it.
+
+    An unmeasurable clip is KEPT. Discarding footage because ffprobe output
+    could not be parsed would turn a tooling hiccup into a missing shot.
+    """
+    if stats is None:
+        return False
+    yavg, ymax = stats
+    return yavg < MIN_YAVG and ymax < MIN_YMAX
+
+
 def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
                topic: str = "", used_ids: set[str] | None = None) -> Path | None:
     """A conformed stock clip, or None so the caller uses a Ken-Burns still.
@@ -260,22 +309,53 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
     if not any(flags.values()):
         return None
     term = search_term(cue, topic)
-    seen = frozenset(used_ids or ())
-    found = None
-    if flags["pixabay"]:
-        found = _search_pixabay(term, size, seen)
-    if not found and flags["pexels"]:
-        found = _search_pexels(term, size, seen)
-    if not found:
-        return None
-    url, clip_id = found
     raw = dest.with_suffix(".src.mp4")
-    if not _download(url, raw):
-        return None
-    clip = _conform(raw, dest, duration, size)
-    raw.unlink(missing_ok=True)
-    # Record only AFTER the clip actually exists. Marking it used earlier would
-    # blacklist footage that never reached the video because a download failed.
-    if clip is not None and used_ids is not None:
-        used_ids.add(clip_id)
-    return clip
+    rejected: set[str] = set()
+    fallback: tuple[Path, str] | None = None
+
+    for _ in range(MAX_CLIP_ATTEMPTS):
+        seen = frozenset(used_ids or ()) | rejected
+        found = None
+        if flags["pixabay"]:
+            found = _search_pixabay(term, size, seen)
+        if not found and flags["pexels"]:
+            found = _search_pexels(term, size, seen)
+        if not found:
+            break
+        url, clip_id = found
+        if not _download(url, raw):
+            rejected.add(clip_id)
+            continue
+        clip = _conform(raw, dest, duration, size)
+        raw.unlink(missing_ok=True)
+        if clip is None:
+            rejected.add(clip_id)
+            continue
+        if _unwatchable(_frame_stats(clip)):
+            # Keep the first dim clip in reserve: a dark shot still beats the
+            # flat gradient card the caller falls back to.
+            if fallback is None:
+                keep = clip.with_suffix(".dim.mp4")
+                try:
+                    clip.replace(keep)
+                    fallback = (keep, clip_id)
+                except OSError:
+                    pass
+            rejected.add(clip_id)
+            continue
+        # Record only AFTER the clip exists and is worth showing. Marking it
+        # earlier would blacklist footage that never reached the video.
+        if used_ids is not None:
+            used_ids.add(clip_id)
+        return clip
+
+    if fallback is not None:
+        keep, clip_id = fallback
+        try:
+            keep.replace(dest)
+        except OSError:
+            return None
+        if used_ids is not None:
+            used_ids.add(clip_id)
+        return dest
+    return None

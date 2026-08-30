@@ -122,3 +122,46 @@ def test_search_pool_deep_enough_for_a_full_video():
     return this many results in a single call, so depth is free.
     """
     assert broll.SEARCH_POOL >= 40, "too shallow; beats will fall back to gradient"
+
+
+def test_unwatchable_keeps_bright_subject_on_black():
+    """Calibrated against real footage: mean luminance ALONE is not enough.
+
+    A naive "too dark" rule rejects the best shots in the video. These numbers
+    are measured from an actual solar-storms render.
+    """
+    assert not broll._unwatchable((120.6, 245.0)), "aurora over a horizon"
+    assert not broll._unwatchable((39.6, 255.0)), "sun disc on black space"
+    assert not broll._unwatchable((31.3, 188.0)), "dim but has highlights"
+    assert broll._unwatchable((16.1, 107.0)), "dead night frame"
+    assert broll._unwatchable((23.2, 89.0)), "dead grey frame"
+    # A clip that cannot be measured is kept: a tooling failure must not
+    # silently turn into a missing shot.
+    assert not broll._unwatchable(None)
+
+
+def test_fetch_clip_retries_past_a_dark_clip(monkeypatch, tmp_path):
+    """A rejected clip advances to the next candidate instead of giving up."""
+    monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
+    offered = ["pexels:dark", "pexels:good"]
+
+    def search(term, size, exclude=frozenset()):
+        for cid in offered:
+            if cid not in exclude:
+                return f"http://v/{cid}.mp4", cid
+        return None
+
+    monkeypatch.setattr(broll, "_search_pexels", search)
+    monkeypatch.setattr(broll, "_download", lambda url, dest: True)
+    seq = iter([(10.0, 50.0), (120.0, 240.0)])   # first dark, second fine
+    monkeypatch.setattr(broll, "_frame_stats", lambda p: next(seq))
+
+    def conform(src, out, d, s):
+        out.write_bytes(b"x")
+        return out
+
+    monkeypatch.setattr(broll, "_conform", conform)
+    used: set[str] = set()
+    got = broll.fetch_clip("aurora", tmp_path / "a.mp4", 4.0, (1920, 1080), used_ids=used)
+    assert got is not None
+    assert used == {"pexels:good"}, "the dark clip must not be recorded as used"
