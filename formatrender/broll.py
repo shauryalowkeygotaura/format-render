@@ -153,6 +153,33 @@ def _search_pexels(term: str, size: tuple[int, int],
     return None
 
 
+def _download(url: str, dest: Path) -> bool:
+    try:
+        with requests.get(url, timeout=(15, 60), stream=True) as r:
+            if r.status_code != 200:
+                return False
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest, "wb") as fh:
+                for chunk in r.iter_content(1 << 16):
+                    fh.write(chunk)
+    except (requests.RequestException, OSError):
+        return False
+    return dest.exists() and dest.stat().st_size > 50_000
+
+
+def _conform(src: Path, out: Path, duration: float, size: tuple[int, int]) -> Path | None:
+    """Loop/trim to the narration length, scale-crop to frame, strip audio."""
+    w, h = size
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},fps={config.FPS},format=yuv420p")
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(src),
+         "-t", f"{duration:.3f}", "-vf", vf, "-an",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
+        capture_output=True)
+    return out if proc.returncode == 0 and out.exists() else None
+
+
 def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
                topic: str = "", used_ids: set[str] | None = None) -> Path | None:
     """A conformed stock clip, or None so the caller uses a Ken-Burns still.
