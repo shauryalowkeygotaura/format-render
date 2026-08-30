@@ -214,7 +214,9 @@ def cmd_render(args) -> int:
     print(f"  segments {len(b.beats) + (1 if b.hook else 0)}\n")
 
     result = compose.compose(b, spec, work, resume=not args.fresh,
-                             use_broll=args.broll)
+                             use_broll=args.broll,
+                             use_gen=getattr(args, 'gen', False),
+                             tone=getattr(args, 'tone', ''))
 
     print(f"\nVideo -> {result.video_path}")
     print(f"  duration          {result.duration:.1f}s ({result.duration/60:.1f} min)")
@@ -318,6 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--force", action="store_true",
                    help="render even if the brief failed the differentiation gate")
     r.add_argument("--fresh", action="store_true", help="ignore the resume cache")
+    r.add_argument("--gen", action="store_true",
+                   help="generate imagery from each beat's visual field instead of "
+                        "searching stock (slow: ~39s per shot, strictly serial)")
+    r.add_argument("--tone", default="",
+                   help="per-video visual constraint carried into every prompt, "
+                        "e.g. 'night, blackout, unlit'. Prevents sunny footage "
+                        "appearing in a dark story.")
     r.add_argument("--shorts", type=int, default=4,
                    help="max vertical shorts to cut from the master")
     r.add_argument("--no-shorts", action="store_true", help="master only")

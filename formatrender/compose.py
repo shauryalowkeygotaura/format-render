@@ -19,7 +19,7 @@ from pathlib import Path
 
 import concurrent.futures as cf
 
-from . import broll, captions, config, shots, visuals, voice
+from . import broll, captions, config, imagegen, shots, visuals, voice
 from .brief import Brief
 
 
@@ -127,6 +127,7 @@ def _pick_hero(renders: list[BeatRender]) -> Path | None:
 
 
 def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
+            use_gen: bool = False, tone: str = "",
             verbose: bool = True, use_broll: bool = False) -> RenderResult:
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
@@ -212,6 +213,20 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
 
             clip = prefetched.get(k)
+
+            # Generated imagery, when asked for. Built from the BEAT'S `visual`
+            # field, which is purpose-written to describe what should be seen,
+            # rather than from keywords scraped out of the narration. That is
+            # the whole difference: stock search can only approximate the
+            # subject, generation makes it true by construction.
+            if clip is None and use_gen:
+                prompt = imagegen.build_prompt(cue, text, tone)
+                img = imagegen.generate(prompt, work / "gen" / f"{slug}_{k:02d}.jpg",
+                                        seed=abs(hash((slug, k))) % 100000)
+                if img is not None:
+                    clip = visuals.ken_burns(img, shot_out, seg, size,
+                                             zoom_in=((i + k) % 2 == 0))
+
             if clip is None:
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,
