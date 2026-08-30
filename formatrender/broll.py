@@ -233,9 +233,16 @@ def _search_pexels(term: str, size: tuple[int, int],
     if not key:
         return None
     try:
+        # Page through, do not just read page 1. Pexels reports total_results in
+        # the thousands (8000 for "dark city night") while per_page caps at 80,
+        # so reading only the first page made the pool look 100x shallower than
+        # it is. The page is derived from the offset so different shots reach
+        # different pages instead of all contending for the same 80 results.
+        page = 1 + (offset // max(1, SEARCH_POOL))
         r = requests.get(PEXELS_API, timeout=(15, 30),
                          headers={"Authorization": key},
                          params={"query": term, "per_page": SEARCH_POOL,
+                                 "page": page,
                                  "orientation": "landscape", "size": "medium"})
         if r.status_code != 200:
             return None
