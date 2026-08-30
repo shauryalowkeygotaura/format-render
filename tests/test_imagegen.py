@@ -31,12 +31,21 @@ def test_longest_key_wins():
     assert "near black with one faint light" == out
 
 
-def test_prompt_prefers_the_visual_field_over_narration():
-    """The brief's `visual` describes what should be SEEN; narration what is SAID."""
-    p = imagegen.build_prompt("a substation arcing at night",
-                              narration="Level three, the local kill.")
-    assert "substation" in p
-    assert "Level three" not in p
+def test_prompt_anchors_on_visual_and_varies_on_the_shot():
+    """`visual` anchors the subject; the shot's span is what makes shots differ.
+
+    These COMBINE rather than one replacing the other. Using only `visual` gave
+    every shot in a beat an identical prompt - five consecutive frames of the
+    same hanging lightbulb, tonally right and completely monotonous.
+    """
+    v = "a kitchen at night lit by a single bulb"
+    a = imagegen.build_prompt(v, narration="fridge clicks back on")
+    b = imagegen.build_prompt(v, narration="spoon on the counter")
+    assert "kitchen" in a and "kitchen" in b          # subject held
+    assert a != b                                     # shots differ
+    assert "fridge" in a and "spoon" in b
+    # The anchor leads, so the subject dominates the query.
+    assert a.index("kitchen") < a.index("fridge")
 
 
 def test_prompt_falls_back_to_narration_when_visual_is_empty():

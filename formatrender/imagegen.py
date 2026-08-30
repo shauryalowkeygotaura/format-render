@@ -91,8 +91,15 @@ def build_prompt(visual: str, narration: str = "", tone: str = "") -> str:
     bright sunny footage even when the subject keyword matches, and tone is the
     only thing that prevents it.
     """
-    base = (visual or narration or "").strip()
-    base = " ".join(base.split()[:28])
+    # COMBINE, do not fall back. `visual` is the beat-level anchor and keeps the
+    # subject right; `narration` is this SHOT's span and is what makes shots
+    # differ from each other. Using only `visual` gave every shot in a beat the
+    # same prompt: five consecutive frames of the same hanging lightbulb,
+    # tonally perfect and completely monotonous - the same defect stock dedupe
+    # was built to prevent, arriving by a different route.
+    anchor = " ".join((visual or "").split()[:22])
+    detail = " ".join((narration or "").split()[:14])
+    base = ", ".join(x for x in (anchor, detail) if x) or "abstract"
     parts = [_positive(base)]
     if tone:
         parts.append(tone.strip())

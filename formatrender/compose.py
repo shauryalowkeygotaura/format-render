@@ -220,7 +220,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             # the whole difference: stock search can only approximate the
             # subject, generation makes it true by construction.
             if clip is None and use_gen:
-                prompt = imagegen.build_prompt(cue, text, tone)
+                prompt = imagegen.build_prompt(cue, shot_cue, tone)
                 img = imagegen.generate(prompt, work / "gen" / f"{slug}_{k:02d}.jpg",
                                         seed=abs(hash((slug, k))) % 100000)
                 if img is not None:
