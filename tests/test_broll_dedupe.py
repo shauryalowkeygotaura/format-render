@@ -30,8 +30,11 @@ def test_no_unresolved_names():
     top = {n.name for n in mod.body if isinstance(n, ast.FunctionDef)}
     top |= {t.id for n in mod.body if isinstance(n, ast.Assign)
             for t in n.targets if isinstance(t, ast.Name)}
-    top |= {n.names[0].asname or n.names[0].name.split(".")[0]
-            for n in mod.body if isinstance(n, (ast.Import, ast.ImportFrom))}
+    # EVERY imported name, not just the first: `from x import a, b` binds both,
+    # and reading only names[0] reports `b` as undefined.
+    top |= {alias.asname or alias.name.split(".")[0]
+            for n in mod.body if isinstance(n, (ast.Import, ast.ImportFrom))
+            for alias in n.names}
     unresolved = {}
     for fn in (n for n in mod.body if isinstance(n, ast.FunctionDef)):
         called = {c.func.id for c in ast.walk(fn)

@@ -158,34 +158,42 @@ def _print_thumb(res: dict) -> None:
         print(f"  ! {res['layout_advice']}")
 
 
-def _frames_from_video(video: Path, beats, out_dir: Path) -> list[Path]:
-    """Thumbnail candidates lifted from the finished video.
+def _frames_from_footage(work: Path, limit: int = 24) -> list[Path]:
+    """Thumbnail candidates taken from the conformed shot clips.
 
-    Candidates used to come only from Commons stills (`r.image`). With --broll
-    the beats that found footage have no still at all, so the list was whatever
-    grey leftovers remained, and the build warned that its source was
-    near-monochrome and was a subject on a plain background where this format
-    wants a wide environmental frame.
+    NOT from the finished master. The master has the subtitles burned in, so a
+    frame lifted from it carries a line of narration across the middle of the
+    thumbnail: the first build this way came out reading "it with a grid-wide
+    blackout." The shot clips are the same footage one stage earlier, before
+    captions are burned at concat.
 
-    Frames from the stock footage are exactly that frame: colourful, wide, and
-    already the imagery the viewer is about to watch, so the thumbnail promises
-    what the video delivers instead of advertising a different picture.
+    Candidates used to come only from Commons stills, and with --broll the beats
+    that find footage have no still at all, so the list was whatever grey
+    leftovers remained from beats that matched nothing.
     """
     out: list[Path] = []
-    if not video or not Path(video).exists():
+    shots = Path(work) / "shots"
+    if not shots.is_dir():
         return out
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for i, r in enumerate(beats):
-        try:
-            mid = (float(r.start) + float(r.end)) / 2.0
-        except (TypeError, ValueError):
-            continue
-        if not (mid > 0):
-            continue
-        dest = out_dir / f"frame_{i:02d}.jpg"
+    clips = sorted(shots.glob("*_b.mp4"))          # stock footage
+    if not clips:
+        clips = sorted(shots.glob("*.mp4"))        # Ken-Burns fallback
+    # Opening footage first. The scorer ranks exposure and layout and has no
+    # idea what the video is ABOUT, so given the whole video it awarded a clean
+    # 4/4 to an aerial shot of farmland, the single most irrelevant frame in a
+    # video about solar storms, over a 3/4 shot of the sun. The hook and first
+    # beat are matched to the cue closest to the title's promise, so preferring
+    # them constrains the scorer to frames that are at least on-topic.
+    opening = [c for c in clips if c.name.startswith(("hook_", "beat0_"))]
+    if len(opening) >= 4:
+        clips = opening + [c for c in clips if c not in opening]
+    frames = Path(work) / "thumbframes"
+    frames.mkdir(parents=True, exist_ok=True)
+    for i, clip in enumerate(clips[:limit]):
+        dest = frames / f"cand_{i:02d}.jpg"
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{mid:.2f}",
-             "-i", str(video), "-frames:v", "1", "-q:v", "2", str(dest)],
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", "1.5", "-i", str(clip),
+             "-frames:v", "1", "-q:v", "2", str(dest)],
             capture_output=True, text=True)
         # A frame that did not decode is skipped rather than handed on as a
         # zero-byte candidate the scorer would rank on garbage.
@@ -222,8 +230,7 @@ def cmd_render(args) -> int:
     if getattr(args, "broll", False):
         # Footage frames first: with --broll they are what the video actually
         # shows, and the Commons stills are leftovers from beats that found none.
-        stills = _frames_from_video(result.video_path, result.beats,
-                                    out_dir / "thumbframes") + stills
+        stills = _frames_from_footage(work) + stills
     # hero_still is a Commons still. With --broll most beats have no still
     # at all, so falling back to it ignored every footage frame gathered
     # above and rebuilt from the same grey leftover: two renders with wholly
