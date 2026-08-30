@@ -24,22 +24,38 @@ from formatrender import broll
 
 
 def test_no_unresolved_names():
-    """Every name a broll function calls is actually defined in the module."""
+    """Every name a broll function calls is actually defined.
+
+    Collects CLASSES and names bound INSIDE a function as well as module-level
+    defs. Without both, a nested helper (`_hold` inside fetch_clip) and a class
+    (`ComposeError`) are reported as undefined, and a checker that cries wolf
+    gets switched off, which defeats the point of having it.
+    """
     src = pathlib.Path(broll.__file__).read_text(encoding="utf-8")
     mod = ast.parse(src)
-    top = {n.name for n in mod.body if isinstance(n, ast.FunctionDef)}
-    top |= {t.id for n in mod.body if isinstance(n, ast.Assign)
-            for t in n.targets if isinstance(t, ast.Name)}
-    # EVERY imported name, not just the first: `from x import a, b` binds both,
-    # and reading only names[0] reports `b` as undefined.
-    top |= {alias.asname or alias.name.split(".")[0]
-            for n in mod.body if isinstance(n, (ast.Import, ast.ImportFrom))
-            for alias in n.names}
+
+    def _bound(node):
+        """Names bound directly in this scope."""
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                out.add(n.name)
+            elif isinstance(n, ast.Assign):
+                out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                out |= {a.asname or a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.arg):
+                out.add(n.arg)
+        return out
+
+    top = _bound(mod)
     unresolved = {}
-    for fn in (n for n in mod.body if isinstance(n, ast.FunctionDef)):
+    for fn in (n for n in mod.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        allowed = top | _bound(fn)
         called = {c.func.id for c in ast.walk(fn)
                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
-        missing = {c for c in called if c not in top and not hasattr(builtins, c)}
+        missing = {c for c in called if c not in allowed and not hasattr(builtins, c)}
         if missing:
             unresolved[fn.name] = sorted(missing)
     assert not unresolved, f"calls names that do not exist: {unresolved}"
