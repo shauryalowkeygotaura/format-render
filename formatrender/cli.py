@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -157,6 +158,42 @@ def _print_thumb(res: dict) -> None:
         print(f"  ! {res['layout_advice']}")
 
 
+def _frames_from_video(video: Path, beats, out_dir: Path) -> list[Path]:
+    """Thumbnail candidates lifted from the finished video.
+
+    Candidates used to come only from Commons stills (`r.image`). With --broll
+    the beats that found footage have no still at all, so the list was whatever
+    grey leftovers remained, and the build warned that its source was
+    near-monochrome and was a subject on a plain background where this format
+    wants a wide environmental frame.
+
+    Frames from the stock footage are exactly that frame: colourful, wide, and
+    already the imagery the viewer is about to watch, so the thumbnail promises
+    what the video delivers instead of advertising a different picture.
+    """
+    out: list[Path] = []
+    if not video or not Path(video).exists():
+        return out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for i, r in enumerate(beats):
+        try:
+            mid = (float(r.start) + float(r.end)) / 2.0
+        except (TypeError, ValueError):
+            continue
+        if not (mid > 0):
+            continue
+        dest = out_dir / f"frame_{i:02d}.jpg"
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{mid:.2f}",
+             "-i", str(video), "-frames:v", "1", "-q:v", "2", str(dest)],
+            capture_output=True, text=True)
+        # A frame that did not decode is skipped rather than handed on as a
+        # zero-byte candidate the scorer would rank on garbage.
+        if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 1024:
+            out.append(dest)
+    return out
+
+
 def cmd_render(args) -> int:
     b, spec = _load(args)
     out_dir = config.OUTPUT / _slug(b.title)
@@ -182,6 +219,11 @@ def cmd_render(args) -> int:
 
     thumb_out = out_dir / "thumbnail.jpg"
     stills = [Path(r.image) for r in result.beats if r.image_found]
+    if getattr(args, "broll", False):
+        # Footage frames first: with --broll they are what the video actually
+        # shows, and the Commons stills are leftovers from beats that found none.
+        stills = _frames_from_video(result.video_path, result.beats,
+                                    out_dir / "thumbframes") + stills
     if args.best_still and len(stills) > 1:
         print(f"\n  trying {len(stills)} stills against the format spec")
         thumb = thumbnail.build_best(b.title, stills, spec, thumb_out, b.thumbnail_text)
