@@ -23,7 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import (Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont,
+                  ImageOps)
 
 from . import config
 
@@ -474,3 +475,114 @@ def _reverify(path: Path, spec: dict) -> dict:
     if got_layout and got_layout != targets["layout"]:
         result["layout_advice"] = _layout_advice(got_layout, targets["layout"])
     return result
+
+
+# Hue ramp for banded layouts, red through blue. The escalation is carried by
+# COLOUR, not just by the numbers, which is what makes the winning "N levels of"
+# thumbnails readable at phone size before a single word is processed.
+# Ordered COOL to HOT. Direction is chosen per format, not fixed:
+#   danger escalation  -> ends RED, because the last level is the worst
+#   premium escalation -> ends VIOLET, the "rare tier" convention the
+#                         "N levels of luxury" channels use
+# Getting this backwards puts calm green on the catastrophe band, which is what
+# the first build did: level 4 was grid collapse and it rendered green.
+_BAND_COLOURS = [
+    (32, 108, 214), (26, 168, 176), (46, 176, 68), (168, 200, 30),
+    (247, 178, 20), (240, 104, 24), (222, 28, 32), (150, 16, 20),
+]
+_PREMIUM_COLOURS = [
+    (222, 28, 32), (240, 104, 24), (247, 178, 20), (46, 176, 68),
+    (26, 168, 176), (32, 108, 214), (108, 62, 190), (168, 44, 200),
+]
+
+
+def _fit_band(still: Path, w: int, h: int) -> Image.Image:
+    """Centre-crop a still to exactly one band, filling it."""
+    im = Image.open(still).convert("RGB")
+    sw, sh = im.size
+    scale = max(w / sw, h / sh)
+    im = im.resize((max(1, int(sw * scale)), max(1, int(sh * scale))), Image.LANCZOS)
+    sw, sh = im.size
+    # Crop slightly above centre: faces and subjects sit high in a frame.
+    top = max(0, int((sh - h) * 0.35))
+    left = max(0, (sw - w) // 2)
+    return im.crop((left, top, left + w, top + h))
+
+
+def _tint(im: Image.Image, rgb: tuple[int, int, int], amount: float = 0.72) -> Image.Image:
+    """Force a band onto its ramp colour.
+
+    Blending the source directly does NOT work: a white rocket on blue sky
+    blended toward red came out magenta, and two adjacent bands both landed on
+    orange, so the ramp stopped reading as a ramp. The fix is to throw the
+    source hue away first - desaturate to luminance, then colourise that
+    luminance from black through the band colour to white. The photo survives as
+    tonal structure while the hue is guaranteed.
+    """
+    grey = ImageOps.grayscale(im)
+    grey = ImageOps.autocontrast(grey, cutoff=2)
+    r, g, b = rgb
+    # Midtone lands ON the band colour; highlights lift toward white so subjects
+    # stay separable instead of flattening into a colour block.
+    tinted = ImageOps.colorize(grey, black=(0, 0, 0),
+                               mid=(r, g, b),
+                               white=(min(255, r + 90), min(255, g + 90), min(255, b + 90)))
+    out = Image.blend(im, tinted, amount)
+    return ImageEnhance.Contrast(out).enhance(1.18)
+
+
+def _stroked(draw, xy, text, font, fill=(255, 255, 255), stroke=6):
+    draw.text(xy, text, font=font, fill=fill,
+              stroke_width=stroke, stroke_fill=(0, 0, 0), anchor="mm")
+
+
+def build_levels(title: str, stills: list[Path], out: Path,
+                 overlay_text: str = "", size: tuple[int, int] = (1280, 720),
+                 escalation: str = "danger") -> dict:
+    """The banded "N levels of" thumbnail: one numbered colour band per level.
+
+    Measured against 60 real thumbnails, the "7 levels of" format does not use a
+    photograph at all. It uses a graphic composition: N vertical bands on a red
+    to blue ramp, each numbered, each holding its own subject. The format is
+    legible at a glance before any text is read.
+
+    Our previous thumbnails were a single dark still with a caption, scoring
+    31.9 colourfulness against 118.7 for this format - dead last of six groups
+    measured, and 3.7x below the format we were nominally competing in.
+    """
+    w, h = size
+    ramp = _PREMIUM_COLOURS if escalation == "premium" else _BAND_COLOURS
+    n = max(2, min(len(stills), len(ramp)))
+    stills = list(stills)[:n]
+    canvas = Image.new("RGB", size, (12, 12, 14))
+    # Integer band edges so rounding cannot leave a seam between panels.
+    edges = [(i * w) // n for i in range(n + 1)]
+
+    for i, still in enumerate(stills):
+        x0, x1 = edges[i], edges[i + 1]
+        bw = x1 - x0
+        colour = ramp[round(i * (len(ramp) - 1) / max(1, n - 1))]
+        try:
+            band = _fit_band(still, bw, h)
+        except (OSError, ValueError):
+            band = Image.new("RGB", (bw, h), colour)
+        canvas.paste(_tint(band, colour), (x0, 0))
+
+    draw = ImageDraw.Draw(canvas)
+    num_font = _font(int(h * 0.30))
+    lab_font = _font(int(h * 0.075))
+    for i in range(n):
+        cx = (edges[i] + edges[i + 1]) // 2
+        _stroked(draw, (cx, int(h * 0.30)), str(i + 1), num_font, stroke=9)
+        _stroked(draw, (cx, int(h * 0.47)), "LEVEL", lab_font, stroke=5)
+
+    text = choose_overlay(title, overlay_text, max_words=4)
+    if text:
+        band_h = int(h * 0.17)
+        strip = Image.new("RGB", (w, band_h), (10, 10, 12))
+        canvas.paste(strip, (0, h - band_h))
+        _stroked(draw, (w // 2, h - band_h // 2), text, _font(int(band_h * 0.62)), stroke=5)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out, quality=92)
+    return {"path": str(out), "layout": "levels_band", "bands": n, "text": text}

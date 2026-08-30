@@ -46,6 +46,15 @@ def test_no_unresolved_names():
                 out |= {a.asname or a.name.split(".")[0] for a in n.names}
             elif isinstance(n, ast.arg):
                 out.add(n.arg)
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                # Loop targets bind names too. Without this, `for trait, enhancer
+                # in (...)` reports `enhancer` as undefined.
+                tgt = n.target
+                out |= ({e.id for e in tgt.elts if isinstance(e, ast.Name)}
+                        if isinstance(tgt, (ast.Tuple, ast.List))
+                        else ({tgt.id} if isinstance(tgt, ast.Name) else set()))
+            elif isinstance(n, ast.withitem) and isinstance(n.optional_vars, ast.Name):
+                out.add(n.optional_vars.id)
         return out
 
     top = _bound(mod)
