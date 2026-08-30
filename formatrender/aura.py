@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import subprocess
 import os
 import re
 import urllib.error
@@ -182,6 +183,38 @@ def _word_timings(audio: Path, spoken: str) -> list[tuple[str, float, float]]:
     return out
 
 
+# Aura narrates at about 119 words per minute. Nine working channels in these
+# formats sit at 147-182 (median 165), so our delivery is below the entire band
+# and reads as slow before anything else about the video is judged. Deepgram
+# exposes no rate control, so the audio is retimed afterwards with atempo, which
+# changes speed without shifting pitch.
+#
+# CRITICAL: this runs BEFORE probe_duration and _word_timings. Both are derived
+# from the file on disk, so retiming first keeps duration and caption timings
+# correct by construction; retiming afterwards would desynchronise every caption.
+SPEECH_RATE = float(os.environ.get("FR_SPEECH_RATE", "1.35") or 1.35)
+
+
+def _retime(mp3: Path, rate: float) -> None:
+    """Speed the narration in place. Leaves the file untouched on any failure."""
+    # atempo accepts 0.5-2.0 in a single instance; anything outside that is a
+    # mistake, not a request.
+    if not (0.5 <= rate <= 2.0) or abs(rate - 1.0) < 0.01:
+        return
+    tmp = mp3.with_suffix(".retimed.mp3")
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3),
+         "-filter:a", f"atempo={rate:.3f}", "-vn", str(tmp)],
+        capture_output=True)
+    if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 1000:
+        try:
+            tmp.replace(mp3)
+            return
+        except OSError:
+            pass
+    tmp.unlink(missing_ok=True)
+
+
 def narrate(text: str, out_dir: Path, slug: str, *,
             voice: str | None = None) -> Narration | None:
     """Synthesise one segment. Returns None so the caller can fall back.
@@ -208,6 +241,7 @@ def narrate(text: str, out_dir: Path, slug: str, *,
     if len(audio) < _MIN_AUDIO_BYTES:
         return None
     mp3.write_bytes(audio)
+    _retime(mp3, SPEECH_RATE)
 
     dur = probe_duration(mp3)
     if dur <= 0:
