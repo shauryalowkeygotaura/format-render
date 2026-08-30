@@ -111,3 +111,14 @@ def test_fetch_clip_forwards_used_ids(monkeypatch, tmp_path):
     broll.fetch_clip("aurora", tmp_path / "c.mp4", 4.0, (1920, 1080),
                      used_ids={"pexels:99"})
     assert seen["exclude"] == frozenset({"pexels:99"})
+
+
+def test_search_pool_deep_enough_for_a_full_video():
+    """The result pool must outlast one video's shot count.
+
+    Dedupe turns a shallow pool into a visible defect rather than a hidden one:
+    with per_page=10 a 44-shot render exhausted the ~9 usable clips a cue
+    returns and fell through to flat gradient shots for a whole beat. Both APIs
+    return this many results in a single call, so depth is free.
+    """
+    assert broll.SEARCH_POOL >= 40, "too shallow; beats will fall back to gradient"

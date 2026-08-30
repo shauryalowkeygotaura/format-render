@@ -35,9 +35,37 @@ from . import config
 PIXABAY_API = "https://pixabay.com/api/videos/"
 PEXELS_API = "https://api.pexels.com/videos/search"
 MIN_CLIP_SEC = 4
+# How many results to ask for per search. Both APIs return this in ONE call, so
+# a deep pool costs nothing extra in requests.
+#
+# This was 10, which is roughly how many usable clips a cue returns. Once shot
+# dedupe landed, a 44-shot video needed 44 distinct clips while each cue could
+# only ever offer ~9, so later beats exhausted the pool and fell through to a
+# flat gradient: 9 consecutive gradient shots in one beat. Measured against the
+# live API, per_page=80 returns 76-80 usable clips for the same cues.
+SEARCH_POOL = 80
 _key_cycle: itertools.cycle | None = None
 
-_STOP = {"image", "photo", "shot", "view", "of", "the", "a", "an", "and", "with"}
+# Words that name no picture. A stock query built from verbs, connectives or
+# abstractions ("arrives", "expand", "insurance") matches nothing in particular,
+# and both APIs answer ANY query with a full page of loosely-related results, so
+# a meaningless query fails silently instead of returning nothing.
+_STOP = {
+    "image", "photo", "shot", "view", "of", "the", "a", "an", "and", "with",
+    # connectives and determiners
+    "from", "into", "onto", "over", "under", "that", "this", "these", "those",
+    "than", "then", "when", "what", "which", "while", "where", "their", "them",
+    "they", "there", "its", "for", "but", "not", "you", "your", "our", "was",
+    "were", "are", "has", "have", "had", "been", "being", "can", "will",
+    "would", "could", "should", "may", "might", "must", "each", "every", "all",
+    "any", "some", "most", "more", "less", "very", "just", "only", "also",
+    # generic verbs and abstractions that describe no visible subject
+    "arrives", "arrive", "expand", "expands", "suffer", "suffers", "posing",
+    "cause", "causes", "caused", "begin", "begins", "start", "starts", "make",
+    "makes", "made", "take", "takes", "become", "becomes", "happen", "happens",
+    "means", "meant", "keep", "keeps", "need", "needs", "used", "using",
+    "total", "large", "small", "slight", "chaos", "insurance", "levels",
+}
 
 
 def enabled() -> dict[str, bool]:
@@ -46,25 +74,63 @@ def enabled() -> dict[str, bool]:
 
 
 def search_term(cue: str, topic: str = "") -> str:
-    """Stock libraries index generic concepts, not named entities.
+    """A query a stock library can actually match.
 
-    'image of 16 Psyche' returns nothing on Pixabay; 'asteroid space' returns
-    plenty. So the entity is dropped and the topic carried instead, which is
-    the opposite of the Commons ladder in visuals.py, where the entity is the
-    whole point.
+    Stock libraries index concrete, generic concepts: "aurora", "power grid",
+    "city at night". They do not index named entities, so 'image of 16 Psyche'
+    returns nothing useful while 'asteroid space' returns plenty.
+
+    Two bugs made this return near-random queries, which is why the footage
+    looked unrelated to the narration:
+
+    1. The proper-noun filter was dead. `words` was lowercased BEFORE testing
+       `w[0].isupper()`, so the test was never true and nothing was ever
+       filtered. It just took the first two words of the cue.
+    2. Those first two words are the worst possible choice. shots._keywords
+       deliberately sorts proper nouns FIRST, because for Commons the named
+       entity is the whole point. Chained together, this function reliably
+       picked exactly the words it was written to reject, producing queries
+       like "chaos power ..." and "total carrington ...".
+
+    The topic is also condensed. Appending the whole topic sentence made every
+    cue's query ~80% identical boilerplate, so unrelated shots searched for
+    nearly the same thing and the query's specific half was drowned out.
     """
-    words = [w.lower() for w in re.findall(r"[A-Za-z]{3,}", cue or "")
-             if w.lower() not in _STOP]
-    generic = [w for w in words if not w[0].isupper()][:2]
-    parts = generic or words[:2]
-    if topic:
-        parts.append(topic.lower())
-    seen, out = set(), []
-    for p in parts:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return " ".join(out[:3]) or (topic or "abstract")
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", cue or "")
+    generic, proper, seen = [], [], set()
+    for w in tokens:
+        low = w.lower()
+        if low in _STOP or low in seen:
+            continue
+        seen.add(low)
+        # Case must be read from the ORIGINAL token, not a lowercased copy.
+        (proper if w[0].isupper() else generic).append(low)
+    # Generic concepts first; proper nouns only when there is nothing else, so a
+    # cue made entirely of names still produces a query rather than an empty one.
+    parts = (generic or proper)[:2]
+
+    for w in _topic_anchor(topic):
+        if w not in parts:
+            parts.append(w)
+    return " ".join(parts[:4]) or (topic.lower() if topic else "abstract")
+
+
+def _topic_anchor(topic: str, limit: int = 2) -> list[str]:
+    """The first couple of content words of the topic.
+
+    Topics here are written subject-first ("solar storms hitting Earth, from
+    aurora to grid collapse"), so the opening words carry the subject and the
+    tail is framing that only dilutes the query.
+    """
+    out = []
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", topic or ""):
+        low = w.lower()
+        if low in _STOP or low in out:
+            continue
+        out.append(low)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _pexels_key() -> str | None:
@@ -89,7 +155,7 @@ def _search_pixabay(term: str, size: tuple[int, int],
     try:
         r = requests.get(PIXABAY_API, timeout=(15, 30), params={
             "key": key, "q": term, "video_type": "film",
-            "per_page": 10, "safesearch": "true"})
+            "per_page": SEARCH_POOL, "safesearch": "true"})
         if r.status_code != 200:
             return None
         hits = r.json().get("hits", [])
@@ -124,7 +190,7 @@ def _search_pexels(term: str, size: tuple[int, int],
     try:
         r = requests.get(PEXELS_API, timeout=(15, 30),
                          headers={"Authorization": key},
-                         params={"query": term, "per_page": 10,
+                         params={"query": term, "per_page": SEARCH_POOL,
                                  "orientation": "landscape", "size": "medium"})
         if r.status_code != 200:
             return None
