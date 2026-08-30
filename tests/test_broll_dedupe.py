@@ -122,6 +122,7 @@ def test_fetch_clip_records_only_on_success(monkeypatch, tmp_path):
     out = tmp_path / "b.mp4"
     monkeypatch.setattr(broll, "_download", lambda url, dest: True)
     monkeypatch.setattr(broll, "_conform", lambda src, o, d, s: o)
+    monkeypatch.setattr(broll, "_probe", lambda p: (None, None))
     assert broll.fetch_clip("aurora", out, 4.0, (1920, 1080), used_ids=used) == out
     assert used == {"pexels:11"}
 
@@ -131,7 +132,7 @@ def test_fetch_clip_forwards_used_ids(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
 
-    def spy(term, size, exclude=frozenset()):
+    def spy(term, size, exclude=frozenset(), offset=0):
         seen["exclude"] = exclude
         return None
 
@@ -173,7 +174,7 @@ def test_fetch_clip_retries_past_a_dark_clip(monkeypatch, tmp_path):
     monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
     offered = ["pexels:dark", "pexels:good"]
 
-    def search(term, size, exclude=frozenset()):
+    def search(term, size, exclude=frozenset(), offset=0):
         for cid in offered:
             if cid not in exclude:
                 return f"http://v/{cid}.mp4", cid
@@ -181,8 +182,9 @@ def test_fetch_clip_retries_past_a_dark_clip(monkeypatch, tmp_path):
 
     monkeypatch.setattr(broll, "_search_pexels", search)
     monkeypatch.setattr(broll, "_download", lambda url, dest: True)
-    seq = iter([(10.0, 50.0), (120.0, 240.0)])   # first dark, second fine
-    monkeypatch.setattr(broll, "_frame_stats", lambda p: next(seq))
+    # _probe returns (luma stats, has_face) from one decode.
+    seq = iter([((10.0, 50.0), None), ((120.0, 240.0), None)])
+    monkeypatch.setattr(broll, "_probe", lambda p: next(seq))
 
     def conform(src, out, d, s):
         out.write_bytes(b"x")
@@ -193,3 +195,61 @@ def test_fetch_clip_retries_past_a_dark_clip(monkeypatch, tmp_path):
     got = broll.fetch_clip("aurora", tmp_path / "a.mp4", 4.0, (1920, 1080), used_ids=used)
     assert got is not None
     assert used == {"pexels:good"}, "the dark clip must not be recorded as used"
+
+
+def test_claims_is_atomic_under_threads():
+    """Two threads must never both win the same clip id.
+
+    A plain set fails this: `if id not in used: used.add(id)` is two operations,
+    and concurrent fetches interleave between them. That is the duplicate-footage
+    bug the dedupe exists to prevent, reintroduced by parallelism.
+    """
+    import threading
+    claims = broll.Claims()
+    winners, barrier = [], threading.Barrier(8)
+
+    def go():
+        barrier.wait()          # maximise the overlap
+        if claims.claim("pexels:same"):
+            winners.append(1)
+
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(winners) == 1, f"{len(winners)} threads all claimed the same clip"
+
+
+def test_parallel_fetch_yields_distinct_clips(monkeypatch, tmp_path):
+    """End to end: concurrent fetch_clip calls never return the same footage."""
+    import concurrent.futures as cf
+    pool_ids = [f"pexels:{i}" for i in range(40)]
+    monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
+
+    def search(term, size, exclude=frozenset(), offset=0):
+        free = [c for c in pool_ids if c not in exclude]
+        if not free:
+            return None
+        cid = free[offset % len(free)]
+        return f"http://v/{cid}.mp4", cid
+
+    monkeypatch.setattr(broll, "_search_pexels", search)
+    monkeypatch.setattr(broll, "_download", lambda url, dest: True)
+    monkeypatch.setattr(broll, "_probe", lambda p: (None, None))
+
+    def conform(src, out, d, s):
+        out.write_bytes(b"x")
+        return out
+
+    monkeypatch.setattr(broll, "_conform", conform)
+    claims = broll.Claims()
+
+    def grab(k):
+        return broll.fetch_clip("aurora", tmp_path / f"{k}.mp4", 4.0, (1920, 1080),
+                                used_ids=claims, variant=k)
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        got = [g for g in ex.map(grab, range(20)) if g is not None]
+    assert len(got) == 20, "some parallel fetches returned nothing"
+    assert len(claims) == 20, f"expected 20 distinct claims, got {len(claims)}"

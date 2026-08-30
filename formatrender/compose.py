@@ -17,6 +17,8 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import concurrent.futures as cf
+
 from . import broll, captions, config, shots, visuals, voice
 from .brief import Brief
 
@@ -39,6 +41,11 @@ class RenderResult:
     beats: list[BeatRender]
     hero_still: Path | None
     real_image_ratio: float
+
+
+# Six keeps the network and ffmpeg busy without thrashing a machine that is
+# also encoding. Each worker is one download plus one x264 encode.
+BROLL_WORKERS = 6
 
 
 class ComposeError(RuntimeError):
@@ -142,7 +149,10 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
     parts: list[Path] = []
     renders: list[BeatRender] = []
     # Stock clip ids already used ANYWHERE in this video.
-    used_clip_ids: set[str] = set(state.get('_used_clip_ids', []))
+    # Claims, not a plain set: the prefetch below fetches shots concurrently
+    # and a plain set lets two workers pick the same clip before either
+    # records it.
+    used_clip_ids = broll.Claims(state.get('_used_clip_ids', []))
     cursor = 0.0
     found_count = 0
 
@@ -178,17 +188,30 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         first_still: Path | None = None
         first_ok = False
 
-        for k, shot_cue in enumerate(cue_list):
-            seg = dur / n_shots
-            shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
-            shot_out.parent.mkdir(parents=True, exist_ok=True)
+        seg = dur / n_shots
+        (work / "shots").mkdir(parents=True, exist_ok=True)
+        # Fetch every shot's footage CONCURRENTLY, then assemble in order.
+        # Only the fetch is parallel: the assembly below carries order-dependent
+        # state (seen_digests, first_still, append order) that a thread pool
+        # would scramble. Measured 4.6s per clip after the download and encode
+        # fixes, so 225 shots cost 17 minutes serially; the work is network and
+        # ffmpeg, both of which idle a 18-core machine one clip at a time.
+        prefetched: dict[int, Path | None] = {}
+        if use_broll:
+            def _grab(k: int, cue_text: str):
+                return k, broll.fetch_clip(
+                    cue_text, work / "shots" / f"{slug}_{k:02d}_b.mp4",
+                    seg, size, topic=brief.topic, used_ids=used_clip_ids,
+                    want_face=(k % broll.FACE_EVERY_NTH_SHOT == 1),
+                    variant=k)
+            with cf.ThreadPoolExecutor(max_workers=BROLL_WORKERS) as pool:
+                for k, clip in pool.map(lambda a: _grab(*a), list(enumerate(cue_list))):
+                    prefetched[k] = clip
 
-            clip = None
-            if use_broll:
-                clip = broll.fetch_clip(shot_cue, work / "shots" / f"{slug}_{k:02d}_b.mp4",
-                                        seg, size, topic=brief.topic,
-                                        used_ids=used_clip_ids,
-                                        want_face=(k % broll.FACE_EVERY_NTH_SHOT == 1))
+        for k, shot_cue in enumerate(cue_list):
+            shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
+
+            clip = prefetched.get(k)
             if clip is None:
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,

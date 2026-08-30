@@ -26,6 +26,7 @@ import itertools
 import os
 import re
 import subprocess
+import threading
 import zlib
 from pathlib import Path
 
@@ -185,7 +186,8 @@ def _pexels_key() -> str | None:
 
 
 def _search_pixabay(term: str, size: tuple[int, int],
-                    exclude: frozenset[str] = frozenset()) -> tuple[str, str] | None:
+                    exclude: frozenset[str] = frozenset(),
+                    offset: int = 0) -> tuple[str, str] | None:
     """(url, clip_id) or None. `exclude` holds clip_ids already used."""
     key = os.environ.get("PIXABAY_API_KEY", "").strip()
     if not key:
@@ -201,6 +203,7 @@ def _search_pixabay(term: str, size: tuple[int, int],
         return None
     if not isinstance(hits, list):
         return None
+    acceptable = []
     for hit in hits:
         if not isinstance(hit, dict):
             continue
@@ -215,12 +218,16 @@ def _search_pixabay(term: str, size: tuple[int, int],
         for quality in ("large", "medium", "small"):
             v = videos.get(quality) or {}
             if v.get("url") and int(v.get("width", 0) or 0) >= size[0] // 2:
-                return v["url"], clip_id
-    return None
+                acceptable.append((v["url"], clip_id))
+                break
+    if not acceptable:
+        return None
+    return acceptable[offset % len(acceptable)]
 
 
 def _search_pexels(term: str, size: tuple[int, int],
-                   exclude: frozenset[str] = frozenset()) -> tuple[str, str] | None:
+                   exclude: frozenset[str] = frozenset(),
+                   offset: int = 0) -> tuple[str, str] | None:
     """(url, clip_id) or None. `exclude` holds clip_ids already used."""
     key = _pexels_key()
     if not key:
@@ -237,6 +244,7 @@ def _search_pexels(term: str, size: tuple[int, int],
         return None
     if not isinstance(videos, list):
         return None
+    acceptable = []
     for vid in videos:
         if not isinstance(vid, dict):
             continue
@@ -248,13 +256,34 @@ def _search_pexels(term: str, size: tuple[int, int],
         # `continue`, not `break`: try the next video, do not abandon the search.
         if clip_id in exclude:
             continue
-        files = sorted((f for f in vid.get("video_files", [])
-                        if isinstance(f, dict) and f.get("link")),
-                       key=lambda f: -int(f.get("width", 0) or 0))
-        for f in files:
-            if int(f.get("width", 0) or 0) >= size[0] // 2:
-                return f["link"], clip_id
-    return None
+        # SMALLEST rendition that still covers the frame, not the largest.
+        # Sorting by -width downloaded a 62 MB 3840x2160 60fps file to render
+        # 1920x1080, so every clip paid 5.6s of transfer and then 8.5s of
+        # conform mostly spent decoding 4K60 that was thrown away. Picking the
+        # smallest file at or above the target width is free quality-wise: the
+        # conform downscales to exactly `size` either way.
+        usable = [f for f in vid.get("video_files", [])
+                  if isinstance(f, dict) and f.get("link")
+                  and int(f.get("width", 0) or 0) >= size[0]]
+        if not usable:  # nothing at full width, fall back to the biggest there is
+            usable = sorted((f for f in vid.get("video_files", [])
+                             if isinstance(f, dict) and f.get("link")
+                             and int(f.get("width", 0) or 0) >= size[0] // 2),
+                            key=lambda f: -int(f.get("width", 0) or 0))[:1]
+        # Then prefer a sane frame rate: 60fps doubles decode cost for frames
+        # the render throws away at config.FPS anyway.
+        usable.sort(key=lambda f: (int(f.get("width", 0) or 0),
+                                   abs(int(f.get("fps", 30) or 30) - config.FPS)))
+        if usable:
+            acceptable.append((usable[0]["link"], clip_id))
+    if not acceptable:
+        return None
+    # Rotate by offset so concurrent shots do not all grab the same first hit.
+    # Without this, every worker snapshots the same exclusions, picks result #0,
+    # and all but one loses the claim race - each collision burning a retry
+    # until workers exhaust MAX_CLIP_ATTEMPTS and return nothing at all.
+    # Rotation is deterministic, so renders stay reproducible.
+    return acceptable[offset % len(acceptable)]
 
 
 def _download(url: str, dest: Path) -> bool:
@@ -279,7 +308,12 @@ def _conform(src: Path, out: Path, duration: float, size: tuple[int, int]) -> Pa
     proc = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(src),
          "-t", f"{duration:.3f}", "-vf", vf, "-an",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
+         # Shot clips are transient: the concat pass re-encodes them to burn
+         # captions, so intermediate encode effort is thrown away. veryfast at
+         # crf 20 is visually indistinguishable after that second pass and
+         # roughly 3x quicker than the default medium preset.
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-pix_fmt", "yuv420p", str(out)],
         capture_output=True)
     return out if proc.returncode == 0 and out.exists() else None
 
@@ -356,9 +390,99 @@ def _has_face(path: Path) -> bool | None:
         return None
 
 
+class Claims:
+    """Thread-safe set of clip ids already used in this video.
+
+    Parallel fetching breaks a plain set: two workers snapshot the same
+    exclusions, search, and can pick the SAME clip before either records it,
+    which is exactly the duplicate-footage bug the dedupe exists to prevent.
+    `claim` makes check-and-add atomic, so the loser is told to try again.
+    """
+
+    def __init__(self, initial=()):
+        self._ids = set(initial)
+        self._lock = threading.Lock()
+
+    def snapshot(self) -> frozenset[str]:
+        with self._lock:
+            return frozenset(self._ids)
+
+    def claim(self, clip_id: str) -> bool:
+        with self._lock:
+            if clip_id in self._ids:
+                return False
+            self._ids.add(clip_id)
+            return True
+
+    def __iter__(self):
+        return iter(self.snapshot())
+
+    def __len__(self):
+        return len(self.snapshot())
+
+
+def _snapshot(used) -> frozenset[str]:
+    if used is None:
+        return frozenset()
+    snap = getattr(used, "snapshot", None)
+    return snap() if snap else frozenset(used)
+
+
+def _claim(used, clip_id: str) -> bool:
+    """True if this caller now owns the id. Plain sets keep working."""
+    if used is None:
+        return True
+    claim = getattr(used, "claim", None)
+    if claim:
+        return claim(clip_id)
+    if clip_id in used:
+        return False
+    used.add(clip_id)
+    return True
+
+
+def _probe(path: Path) -> tuple[tuple[float, float] | None, bool | None]:
+    """((mean, peak) luminance, has_face) from ONE decode of one frame.
+
+    Was two passes over the same frame: _frame_stats spawned an ffmpeg process
+    (0.24s) and _has_face opened the file again in OpenCV (1.76s). Both wanted a
+    single mid-clip frame, so they now share one decode. Costs about a second
+    per clip, and at 225 clips a render that is nearly four minutes.
+
+    Both halves degrade to None independently, keeping the existing contract:
+    an unmeasurable clip is kept rather than discarded.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None, None
+    try:
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None, None
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total > 2:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            return None, None
+        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        stats = (float(np.mean(grey)), float(np.max(grey)))
+        face = None
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if not cascade.empty():
+            face = len(cascade.detectMultiScale(grey, 1.1, 5, minSize=(60, 60))) > 0
+        return stats, face
+    except Exception:
+        return None, None
+
+
 def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
                topic: str = "", used_ids: set[str] | None = None,
-               want_face: bool = False) -> Path | None:
+               want_face: bool = False, variant: int = 0) -> Path | None:
     """A conformed stock clip, or None so the caller uses a Ken-Burns still.
 
     `used_ids` holds the clip ids already placed in THIS video. It is read to
@@ -389,12 +513,12 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
         reserve = (rank, keep, clip_id)
 
     for _ in range(MAX_CLIP_ATTEMPTS):
-        seen = frozenset(used_ids or ()) | rejected
+        seen = _snapshot(used_ids) | rejected
         found = None
         if flags["pixabay"]:
-            found = _search_pixabay(term, size, seen)
+            found = _search_pixabay(term, size, seen, variant)
         if not found and flags["pexels"]:
-            found = _search_pexels(term, size, seen)
+            found = _search_pexels(term, size, seen, variant)
         if not found:
             break
         url, clip_id = found
@@ -406,19 +530,22 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
         if clip is None:
             rejected.add(clip_id)
             continue
-        if _unwatchable(_frame_stats(clip)):
+        stats, face = _probe(clip)
+        if _unwatchable(stats):
             _hold(2, clip, clip_id)
             rejected.add(clip_id)
             continue
         # None means undecidable, which is accepted rather than rejected.
-        if want_face and _has_face(clip) is False:
+        if want_face and face is False:
             _hold(1, clip, clip_id)
             rejected.add(clip_id)
             continue
-        # Recorded only once the clip exists AND is worth showing. Marking it
-        # earlier would blacklist footage that never reached the video.
-        if used_ids is not None:
-            used_ids.add(clip_id)
+        # Claimed only once the clip exists AND is worth showing. Marking it
+        # earlier would blacklist footage that never reached the video. A lost
+        # race means another worker took this clip first, so try the next one.
+        if not _claim(used_ids, clip_id):
+            rejected.add(clip_id)
+            continue
         return clip
 
     if reserve is not None:
@@ -427,7 +554,6 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
             keep.replace(dest)
         except OSError:
             return None
-        if used_ids is not None:
-            used_ids.add(clip_id)
+        _claim(used_ids, clip_id)
         return dest
     return None
