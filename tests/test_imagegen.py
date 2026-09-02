@@ -71,3 +71,21 @@ def test_generate_returns_none_and_keeps_no_file_when_the_body_is_not_an_image(m
     dest = tmp_path / "x.jpg"
     assert imagegen.generate("a street", dest) is None
     assert not dest.exists()
+
+
+def test_generate_reuses_an_existing_valid_image(monkeypatch, tmp_path):
+    """A killed render must not pay ~39s per image to rebuild what it already has."""
+    from PIL import Image
+    dest = tmp_path / "shot.jpg"
+    Image.new("RGB", (1280, 720), (20, 20, 30)).save(dest, quality=92)
+    assert dest.stat().st_size > 5000
+
+    called = {"n": 0}
+
+    def boom(*a, **k):
+        called["n"] += 1
+        raise AssertionError("network was called for an image already on disk")
+
+    monkeypatch.setattr(imagegen.urllib.request, "urlopen", boom)
+    assert imagegen.generate("a dark street", dest) == dest
+    assert called["n"] == 0

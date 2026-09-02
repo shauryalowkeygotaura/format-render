@@ -111,6 +111,12 @@ def generate(prompt: str, dest: Path, *, seed: int | None = None) -> Path | None
     """One image, or None. Serialised and retried; never raises."""
     if not prompt.strip():
         return None
+    # Reuse an image already on disk. Each one costs ~39s, so a render killed
+    # during final assembly would otherwise pay to regenerate everything it had
+    # already produced - 53 images, about 35 minutes, for no new output.
+    # _valid() guards against a truncated file from an interrupted write.
+    if dest.exists() and dest.stat().st_size > 5000 and _valid(dest):
+        return dest
     global _last_request
     q = urllib.parse.quote(prompt[:900], safe="")
     url = f"{ENDPOINT}{q}?width=1280&height=720&nologo=true"
