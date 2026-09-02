@@ -29,6 +29,7 @@ from __future__ import annotations
 import difflib
 import json
 import subprocess
+import time
 import os
 import re
 import urllib.error
@@ -183,16 +184,22 @@ def _word_timings(audio: Path, spoken: str) -> list[tuple[str, float, float]]:
     return out
 
 
-# Aura narrates at about 119 words per minute. Nine working channels in these
-# formats sit at 147-182 (median 165), so our delivery is below the entire band
-# and reads as slow before anything else about the video is judged. Deepgram
-# exposes no rate control, so the audio is retimed afterwards with atempo, which
-# changes speed without shifting pitch.
+# Speech rate. DEFAULT OFF (1.0), and the reason is worth recording.
 #
-# CRITICAL: this runs BEFORE probe_duration and _word_timings. Both are derived
-# from the file on disk, so retiming first keeps duration and caption timings
-# correct by construction; retiming afterwards would desynchronise every caption.
-SPEECH_RATE = float(os.environ.get("FR_SPEECH_RATE", "1.35") or 1.35)
+# I measured our render at 119 words per minute against a 147-182 band from nine
+# working channels, and concluded the narration was too slow. That was a
+# misattribution. 119 was words divided by TOTAL VIDEO DURATION, which includes
+# the hook pause and every inter-beat gap. Measured on real paragraph text, Aura
+# already speaks at 170 wpm - inside the band. Applying the 1.35 correction took
+# it to 240 wpm, which is far too fast to listen to.
+#
+# The video is not slowly spoken. It is a 620-word script stretched over runtime
+# that wants ~2,500 words, so the silence between beats dominates the average.
+# The fix for that is a longer script, not a faster voice.
+#
+# Kept as a knob because it is genuinely useful for tuning a finished render,
+# but it must not be on by default.
+SPEECH_RATE = float(os.environ.get("FR_SPEECH_RATE", "1.0") or 1.0)
 
 
 def _retime(mp3: Path, rate: float) -> None:
@@ -231,11 +238,23 @@ def narrate(text: str, out_dir: Path, slug: str, *,
     out_dir.mkdir(parents=True, exist_ok=True)
     mp3 = out_dir / f"{slug}.mp3"
 
-    try:
-        audio = _post(f"{SPEAK_URL}?model={v}",
-                      json.dumps({"text": text}).encode(),
-                      "application/json")
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+    # Retry transient failures. Returning None here falls back to edge-tts, whose
+    # host (speech.platform.bing.com) does not resolve on this machine, so a
+    # single network blip took down a 40-minute render that was otherwise fine.
+    # The API was verified healthy minutes later: the failure was a blip, not an
+    # outage, and it deserved a retry rather than a fallback.
+    audio = None
+    for attempt in range(3):
+        try:
+            audio = _post(f"{SPEAK_URL}?model={v}",
+                          json.dumps({"text": text}).encode(),
+                          "application/json")
+            break
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+            if attempt == 2:
+                return None
+            time.sleep(2 * (attempt + 1))
+    if audio is None:
         return None
 
     if len(audio) < _MIN_AUDIO_BYTES:
