@@ -304,7 +304,49 @@ def cmd_publish(args) -> int:
         print("  Set YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN in Doppler")
         print("  to go live. This is the same blocker football-shorts-autopilot")
         print("  is parked on; fixing it once fixes both.")
+
+    _print_loop_status()
     return 0
+
+
+def _print_loop_status() -> None:
+    """Report whether format-engine is learning from our uploads, or guessing.
+
+    Printed after every publish because the answer was "guessing" for four
+    shipped briefs and nothing said so. format-engine ranks formats by how the
+    SOURCE channel performed; that is a prior. It becomes evidence only once our
+    own videos have view counts attached, which requires a video id on the
+    shipped row - now attached automatically by publish.attach_to_engine().
+    """
+    engine = config.FORMAT_ENGINE_HOME
+    if not (engine / "formatengine").is_dir():
+        return
+    import sys
+    added = False
+    try:
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+            added = True
+        from formatengine import feedback as _feedback
+        st = _feedback.status()
+    except Exception:  # noqa: BLE001 - diagnostic, never fatal
+        return
+    finally:
+        if added:
+            try:
+                sys.path.remove(str(engine))
+            except ValueError:
+                pass
+
+    print()
+    print(f"Learning loop  {st['shipped']} shipped | {st['with_video_id']} with a video id "
+          f"| {st['with_performance']} with view data")
+    if st.get("learning"):
+        print(f"  CLOSED. Rankings are backed by our own numbers.")
+    else:
+        print(f"  {st['verdict']}")
+        print("  Run `python -m formatengine perf --refresh` a few days after "
+              "upload to pull view counts.")
 
 
 def build_parser() -> argparse.ArgumentParser:

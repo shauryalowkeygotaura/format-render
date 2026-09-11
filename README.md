@@ -248,3 +248,46 @@ formatrender/
   post-processing turns a photograph of one object into a scene composition.
 - **Numeric verification is not visual review.** The nude-painting incident
   passed every automated check. Look at the thumbnail before you upload it.
+
+
+## The learning loop closes itself now (2026-09-10)
+
+`format-engine` ranks formats by how the **source** channel performed. That is a
+prior, not evidence. It becomes evidence only once our own uploads have view
+counts attached, which needs a video id on the shipped brief row.
+
+That closing step used to be a chore a human had to type:
+
+```
+python -m formatengine perf --attach "<brief title>" <videoId>
+```
+
+Across four shipped briefs it had been run **zero** times, so `feedback.status()`
+read `OPEN - no reward data, rankings are still source-channel priors` and
+nothing ever said so out loud. Two changes:
+
+- `publish.upload_via_football()` reads the video id back off the uploader and
+  calls `publish.attach_to_engine()` itself. Best-effort: format-engine may not
+  be present, and bookkeeping never turns a good upload into an error.
+- `format-render publish` prints `feedback.status()` at the end of every run.
+
+### The phantom-success bug this uncovered
+
+`publish.py` shelled `football-shorts-autopilot/modules/uploader.py` as
+
+```
+python modules/uploader.py --file X --title Y --description Z
+```
+
+against a module that had **no `__main__` block and no argument parser**. That
+command imported it, defined three functions, and exited 0 having uploaded
+nothing - and `upload_via_football()` read returncode 0 and returned
+`{"status": "uploaded"}`. The only thing keeping a phantom success off the
+record was the missing YT OAuth creds, which short-circuit to a dry run first.
+The day that token landed, this would have reported a channel full of videos
+that do not exist.
+
+Fixed at both ends: the uploader now has a real CLI that emits one line of JSON
+(`{"ok": true, "video_id": ...}`), it accepts `--tags` and `--thumbnail` (both
+silently dropped before), and `upload_via_football()` **raises** rather than
+claiming an upload it cannot prove. Returncode 0 is no longer accepted as proof.

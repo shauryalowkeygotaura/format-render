@@ -128,11 +128,57 @@ def write_payloads(manifest: dict, out: Path, *, include_shorts: bool = True) ->
     return out
 
 
+def attach_to_engine(title: str, video_id: str) -> bool:
+    """Tell format-engine which video came out of which shipped brief.
+
+    This is the last link of the learning loop, and until 2026-09-10 it was a
+    chore a human had to type:
+
+        python -m formatengine perf --attach "<brief title>" <videoId>
+
+    Across four shipped briefs it had been run zero times, so every ranking in
+    format-engine was still a source-channel prior with no evidence behind it.
+    A loop whose closing step depends on someone remembering it is an open loop,
+    so publishing now closes it itself.
+
+    Best-effort by design: format-engine may not be on this machine, and a
+    bookkeeping failure must never turn a successful upload into an error.
+    """
+    if not video_id or video_id.startswith("DRYRUN-"):
+        return False
+    engine = config.FORMAT_ENGINE_HOME
+    if not (engine / "formatengine").is_dir():
+        return False
+    import sys
+    added = False
+    try:
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+            added = True
+        from formatengine import feedback as _feedback
+        return bool(_feedback.attach_video(title, video_id))
+    except Exception:  # noqa: BLE001 - bookkeeping, never fatal
+        return False
+    finally:
+        if added:
+            try:
+                sys.path.remove(str(engine))
+            except ValueError:
+                pass
+
+
 def upload_via_football(payload: dict, *, dry: bool = True) -> dict:
     """Shell the existing uploader under Doppler. Dry by default, always.
 
     Kept as a subprocess rather than an import: that module does a
     `sys.path.insert` and pulls in football-specific config at import time.
+
+    Reads the video id back off the uploader's stdout (one line of JSON) and
+    hands it to format-engine so the brief that produced this video can later
+    be scored on what it actually did. Before 2026-09-10 the shelled command
+    hit a module with no __main__ block at all: it exited 0 having uploaded
+    nothing, and this function reported "uploaded". Returncode is no longer
+    accepted as proof - a run without a video id is an error, loudly.
     """
     uploader = FOOTBALL_HOME / "modules" / "uploader.py"
     if not uploader.exists():
@@ -145,11 +191,47 @@ def upload_via_football(payload: dict, *, dry: bool = True) -> dict:
         return {"status": "dry-run", "file": payload["file"],
                 "reason": "YT_CLIENT_ID/SECRET/REFRESH_TOKEN not set"
                           if not creds_present() else "dry requested"}
+
     cmd = ["doppler", "run", "-p", DOPPLER_PROJECT, "-c", "dev", "--",
            "python", str(uploader), "--file", payload["file"],
            "--title", payload["title"], "--description", payload["description"]]
+    if payload.get("tags"):
+        cmd += ["--tags", ",".join(payload["tags"])]
+    if payload.get("thumbnail"):
+        cmd += ["--thumbnail", str(payload["thumbnail"])]
+
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(FOOTBALL_HOME))
     if proc.returncode != 0:
         raise PublishError(f"upload failed: {(proc.stderr or '').strip()[-300:]}")
-    return {"status": "uploaded", "file": payload["file"],
+
+    video_id = _video_id_from(proc.stdout)
+    if not video_id:
+        # Exit 0 with no id means the uploader ran and did not upload. Treating
+        # that as success is how a channel ends up with a ledger full of videos
+        # that do not exist.
+        raise PublishError(
+            "upload reported success but returned no video id; refusing to "
+            f"record it. stdout: {(proc.stdout or '').strip()[-200:]!r}")
+
+    return {"status": "uploaded", "file": payload["file"], "video_id": video_id,
+            "attached_to_engine": attach_to_engine(payload.get("title", ""), video_id),
             "output": (proc.stdout or "").strip()[-300:]}
+
+
+def _video_id_from(stdout: str) -> str | None:
+    """Pull the video id out of the uploader's JSON result line.
+
+    Scans backwards: the uploader prints its JSON last, but anything on the way
+    (a Doppler banner, a progress line) may share the stream.
+    """
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("ok") and data.get("video_id"):
+            return str(data["video_id"])
+    return None
