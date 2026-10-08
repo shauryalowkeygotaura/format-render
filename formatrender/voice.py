@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import config
 from . import aura
+from . import paced
 from .tts import Narration, TTSError, narrate as edge_narrate, probe_duration
 
 PROVIDER = os.environ.get("FR_TTS_PROVIDER", "edge").strip().lower()
@@ -42,7 +43,8 @@ KOKORO_CACHE = Path(os.environ.get(
 def available() -> dict[str, str]:
     """What this machine can actually do, for the preflight command."""
     out = {"edge": "ready (default, no key, gives word timings)",
-           "aura": aura.available()}
+           "aura": aura.available(),
+           "paralang": paced.available()}
     try:
         import kokoro_onnx  # noqa: F401
         model = KOKORO_CACHE / "kokoro-v1.0.onnx"
@@ -98,6 +100,15 @@ def narrate(text: str, out_dir: Path, slug: str, *, provider: str | None = None,
             warn: bool = True) -> Narration:
     """Synthesise one segment through the selected provider, edge-tts on failure."""
     choice = (provider or PROVIDER).lower()
+    if choice in ("paralang", "paced"):
+        # Paced narration (beats + emphasis, see paced.py). Falls through to
+        # plain Aura, then edge-tts, so pacing can never cost a render.
+        result = paced.narrate(text, Path(out_dir), slug)
+        if result is not None:
+            return result
+        if warn:
+            print("  ! paralang unavailable, falling back to plain aura")
+        choice = "aura"
     if choice in ("aura", "deepgram"):
         # Aura-2 keeps captions working, unlike kokoro: it recovers word
         # timings by sending its own output back through Deepgram STT and
