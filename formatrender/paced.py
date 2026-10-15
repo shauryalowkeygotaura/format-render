@@ -2,10 +2,10 @@
 make the intense lines land, instead of one flat read.
 
     FR_TTS_PROVIDER=paralang                  the default provider (voice.py)
-    FR_PARALANG_ENGINE=orpheus|aura           orpheus (default) = Groq, ACTS
-                                              [serious]/[dramatic], needs only GROQ_API_KEY;
-                                              aura = the andromeda voice with sentence
-                                              gaps + "..." beats (DEEPGRAM_API_KEY)
+    FR_PARALANG_ENGINE=aura|orpheus           aura (default) = the Andromeda voice with
+                                              sentence gaps + "..." beats (DEEPGRAM_API_KEY);
+                                              orpheus = Groq, ACTS [serious]/[dramatic],
+                                              needs only GROQ_API_KEY
     FR_PARALANG_VOICE=troy                    engine voice (defaults per engine)
     FR_PARALANG_MARKUP=0                      skip the LLM markup pass (text is
                                               used as written, marks and all)
@@ -32,7 +32,7 @@ from pathlib import Path
 from . import aura
 from .tts import Narration, probe_duration
 
-ENGINE = os.environ.get("FR_PARALANG_ENGINE", "orpheus").strip().lower()
+ENGINE = os.environ.get("FR_PARALANG_ENGINE", "aura").strip().lower()   # Andromeda everywhere (2026-10-15)
 VOICE = os.environ.get("FR_PARALANG_VOICE", "").strip() or None
 MARKUP = os.environ.get("FR_PARALANG_MARKUP", "1").strip() != "0"
 
