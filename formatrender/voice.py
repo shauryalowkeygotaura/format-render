@@ -1,8 +1,9 @@
 """Pluggable TTS backends, mirroring the two-tier design in Code/voicezero.
 
-`tts.py`'s edge-tts path is the ALWAYS-THERE default: no key, no install, no
-quota, and it returns the word timings the shorts slicer needs for captions.
-Everything here is an OPTIONAL upgrade selected with FR_TTS_PROVIDER.
+Default provider: paralang (Groq Orpheus, acts emotion, captions timed by Groq
+Whisper; see paced.py). `tts.py`'s edge-tts path is the ALWAYS-THERE safety
+net: no key, no install, no quota, and it returns the word timings the shorts
+slicer needs for captions. FR_TTS_PROVIDER=edge makes it the primary again.
 
 The contract every provider honours: if its package, model or key is missing,
 or the call fails, the caller silently falls back to edge-tts. A render is
@@ -32,7 +33,7 @@ from . import aura
 from . import paced
 from .tts import Narration, TTSError, narrate as edge_narrate, probe_duration
 
-PROVIDER = os.environ.get("FR_TTS_PROVIDER", "edge").strip().lower()
+PROVIDER = os.environ.get("FR_TTS_PROVIDER", "paralang").strip().lower()  # Orpheus via paralang; edge-tts on failure
 
 # Kokoro voice ids: af_* American female, am_* American male, bf_/bm_ British.
 KOKORO_VOICE = os.environ.get("FR_KOKORO_VOICE", "am_michael")
@@ -42,7 +43,7 @@ KOKORO_CACHE = Path(os.environ.get(
 
 def available() -> dict[str, str]:
     """What this machine can actually do, for the preflight command."""
-    out = {"edge": "ready (default, no key, gives word timings)",
+    out = {"edge": "ready (fallback, no key, gives word timings)",
            "aura": aura.available(),
            "paralang": paced.available()}
     try:
