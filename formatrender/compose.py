@@ -183,7 +183,20 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         # taken from the narration it covers, so the picture tracks what is
         # being said and a bad match costs seconds rather than half a minute.
         n_shots = shots.plan(dur, words=len(text.split()))
+        # A purpose-written `visual` cue beats keywords scraped from narration.
+        # The 2026-10-22 Machchhu render searched stock with narration words
+        # ("Two different causes" -> a sunny festival crowd, "more than five
+        # hundred people" -> men pushing a tree), while the beat's own cue said
+        # "suspension bridge cables crowd evening". When the brief carries a
+        # visual, every shot uses it; variety comes from `variant=k` and the
+        # used-clip dedupe, not from swapping in unrelated words.
+        # Stock VIDEO only: stills keep per-shot cues, because fetch_still has no
+        # variant and one repeated query would return one photo, dedupe away,
+        # and hold a single image for the whole beat. Commons stills also do
+        # better on narration names (Machchhu, Morbi) than on generic cues.
+        authored = bool(cue and cue.strip() and cue.strip() != text.strip()[:120])
         cue_list = shots.shot_cues(text, cue, n_shots)
+        broll_cues = [cue] * n_shots if authored else cue_list
         shot_files: list[Path] = []
         seen_digests: set[str] = set()
         first_still: Path | None = None
@@ -203,10 +216,13 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                 return k, broll.fetch_clip(
                     cue_text, work / "shots" / f"{slug}_{k:02d}_b.mp4",
                     seg, size, topic=brief.topic, used_ids=used_clip_ids,
-                    want_face=(k % broll.FACE_EVERY_NTH_SHOT == 1),
+                    # Forced faces only for scraped cues: an authored cue already
+                    # says whether people belong in frame, and a random stock
+                    # model in a disaster story is worse than no face at all.
+                    want_face=(not authored and k % broll.FACE_EVERY_NTH_SHOT == 1),
                     variant=k)
             with cf.ThreadPoolExecutor(max_workers=BROLL_WORKERS) as pool:
-                for k, clip in pool.map(lambda a: _grab(*a), list(enumerate(cue_list))):
+                for k, clip in pool.map(lambda a: _grab(*a), list(enumerate(broll_cues))):
                     prefetched[k] = clip
 
         for k, shot_cue in enumerate(cue_list):
