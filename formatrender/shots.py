@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Middle of the 3 to 5 second window the retention research points at. Shots are
 # derived from narration spans, so this is a target rather than a hard cut.
-SHOT_SECONDS = 4.0
+SHOT_SECONDS = 2.6
 # Under this a shot reads as a flicker rather than an image.
 MIN_SHOT_SECONDS = 2.2
 # A cue needs a few words behind it to be worth searching separately.

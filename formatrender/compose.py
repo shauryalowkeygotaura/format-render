@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import subprocess
+import zlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -64,8 +65,74 @@ def _mux(clip: Path, audio: Path, out: Path) -> None:
           "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
 
 
+# Final-mix loudness. YouTube normalises to about -14 LUFS; the first
+# engineering-failures render measured -26.4 LUFS integrated, i.e. ~12 dB
+# quieter than everything around it, and Shaurya's first note was "the voice is
+# too low". loudnorm on the final mix fixes it for every engine and every video.
+TARGET_LUFS = -14.0
+TRUE_PEAK = -1.5
+
+# Background music: any .mp3/.wav/.m4a in assets/music (royalty-safe tracks
+# only, e.g. YouTube Audio Library). None present -> voice only, still
+# normalised. The bed sits at MUSIC_GAIN and ducks under the narration.
+MUSIC_DIR = Path(__file__).resolve().parent.parent / "assets" / "music"
+MUSIC_GAIN = 0.22
+
+
+def pick_music(seed: str) -> Path | None:
+    """A stable track per video (crc32 of the seed, not hash(): per-process salt)."""
+    if not MUSIC_DIR.is_dir():
+        return None
+    tracks = sorted(p for p in MUSIC_DIR.iterdir()
+                    if p.suffix.lower() in (".mp3", ".wav", ".m4a", ".ogg", ".flac"))
+    if not tracks:
+        return None
+    return tracks[zlib.crc32(seed.encode("utf-8")) % len(tracks)]
+
+
+def _premix(music: Path | None) -> str:
+    """Audio graph up to (not including) loudness, ending in [m]."""
+    # Gentle narrator compression first. TTS speech is peaky: without it the
+    # true-peak ceiling stopped loudnorm at -15.4 LUFS instead of -14, and the
+    # voice sounded thin next to real channels.
+    comp = "acompressor=threshold=-20dB:ratio=3:attack=5:release=120:makeup=2"
+    if music is None:
+        return f"[0:a]{comp}[m]"
+    # Duck the bed under the voice: the narration keys a compressor on the
+    # music, so the music swells in the gaps and drops while words land.
+    return (f"[0:a]{comp},asplit=2[voice][key];"
+            f"[1:a]volume={MUSIC_GAIN}[bed];"
+            f"[bed][key]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=450[duck];"
+            f"[voice][duck]amix=inputs=2:duration=first:normalize=0[m]")
+
+
+def _loudnorm_pass2(inputs_cmd: list[str], music: Path | None) -> str:
+    """Two-pass loudnorm: measure the real mix, then correct it linearly.
+
+    Single-pass loudnorm undershot by ~2 LU on a test cut (-16.1 vs -14), and
+    volume was the first complaint about the first render. Pass 1 measures the
+    finished mix (audio only, fast); pass 2 applies the measured values with
+    linear=true. Falls back to single-pass if the measurement cannot be read.
+    """
+    base = f"loudnorm=I={TARGET_LUFS}:TP={TRUE_PEAK}:LRA=11"
+    probe = inputs_cmd + ["-filter_complex", f"{_premix(music)};[m]{base}:print_format=json[a]",
+                          "-map", "[a]", "-vn", "-f", "null", "-"]
+    probe = [a for a in probe if a not in ("-loglevel", "error")] + ["-hide_banner"]
+    proc = subprocess.run(probe, capture_output=True, text=True)
+    m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", proc.stderr or "", re.S)
+    if proc.returncode != 0 or not m:
+        return base
+    try:
+        j = json.loads(m.group(0))
+        return (f"{base}:measured_I={j['input_i']}:measured_TP={j['input_tp']}"
+                f":measured_LRA={j['input_lra']}:measured_thresh={j['input_thresh']}"
+                f":offset={j['target_offset']}:linear=true")
+    except (ValueError, KeyError):
+        return base
+
+
 def _concat(parts: list[Path], out: Path, work: Path,
-            caption_file: Path | None = None) -> None:
+            caption_file: Path | None = None, music: Path | None = None) -> None:
     listfile = work / "concat.txt"
     # Absolute paths: the concat demuxer resolves relative entries against the
     # list file's own directory, which would double the prefix.
@@ -74,14 +141,24 @@ def _concat(parts: list[Path], out: Path, work: Path,
         encoding="utf-8")
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
            "-i", str(listfile)]
+    if music is not None:
+        # Loop the bed for the whole video; -shortest below trims it.
+        cmd += ["-stream_loop", "-1", "-i", str(music)]
+
     # Burn captions in THIS pass rather than a second one. The concat already
     # re-encodes to libx264, so folding the subtitles filter in costs one
     # filtergraph and avoids a second generation of compression loss.
     # An empty caption file crashes the subtitles filter, hence the size check.
+    vchain = "null"
     if caption_file is not None and caption_file.exists() and caption_file.stat().st_size > 0:
-        cmd += ["-vf", f"subtitles='{captions.escape_filter_path(caption_file)}'"]
-    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", str(out)]
+        vchain = f"subtitles='{captions.escape_filter_path(caption_file)}'"
+
+    loud = _loudnorm_pass2(cmd, music)
+    achain = f"{_premix(music)};[m]{loud}[a]"
+    cmd += ["-filter_complex", f"[0:v]{vchain}[v];{achain}",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest", str(out)]
     _run(cmd)
 
 
@@ -331,7 +408,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             config.RESOLUTION, margin_frac=0.08)
         if verbose:
             print(f"  captions: {caption_file.name}")
-    _concat(parts, master, work, caption_file)
+    _concat(parts, master, work, caption_file, music=pick_music(brief.title))
 
     hero = _pick_hero(renders)
 
