@@ -2,3 +2,8 @@ output/
 __pycache__/
 *.pyc
 .env
+
+# Music tracks: large binaries, licensed per CREDITS.json; keep out of git.
+assets/music/*.mp3
+assets/music/*.wav
+assets/music/*.m4a

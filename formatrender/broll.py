@@ -319,7 +319,7 @@ def _conform(src: Path, out: Path, duration: float, size: tuple[int, int]) -> Pa
          # captions, so intermediate encode effort is thrown away. veryfast at
          # crf 20 is visually indistinguishable after that second pass and
          # roughly 3x quicker than the default medium preset.
-         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
          "-pix_fmt", "yuv420p", str(out)],
         capture_output=True)
     return out if proc.returncode == 0 and out.exists() else None

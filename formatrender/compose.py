@@ -42,11 +42,14 @@ class RenderResult:
     beats: list[BeatRender]
     hero_still: Path | None
     real_image_ratio: float
+    # License credit for the music bed, appended to the upload description.
+    music_credit: str = ""
 
 
 # Six keeps the network and ffmpeg busy without thrashing a machine that is
 # also encoding. Each worker is one download plus one x264 encode.
 BROLL_WORKERS = 6
+NARRATION_WORKERS = 3
 
 
 class ComposeError(RuntimeError):
@@ -77,6 +80,21 @@ TRUE_PEAK = -1.5
 # normalised. The bed sits at MUSIC_GAIN and ducks under the narration.
 MUSIC_DIR = Path(__file__).resolve().parent.parent / "assets" / "music"
 MUSIC_GAIN = 0.22
+
+
+def music_credit(track: Path | None) -> str:
+    """The attribution a CC-BY track requires, from assets/music/CREDITS.json.
+
+    A track with no recorded credit returns a loud placeholder instead of "",
+    so an unlicensed-looking upload is caught at review, not by Content ID.
+    """
+    if track is None:
+        return ""
+    try:
+        credits = json.loads((MUSIC_DIR / "CREDITS.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        credits = {}
+    return credits.get(track.name) or f"MUSIC CREDIT MISSING for {track.name}: check its license before upload"
 
 
 def pick_music(seed: str) -> Path | None:
@@ -157,7 +175,9 @@ def _concat(parts: list[Path], out: Path, work: Path,
     achain = f"{_premix(music)};[m]{loud}[a]"
     cmd += ["-filter_complex", f"[0:v]{vchain}[v];{achain}",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            # The only encode a viewer sees: intermediates are near-lossless, so
+            # this pass sets final quality. CRF 20 (was default 23).
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest", str(out)]
     _run(cmd)
 
@@ -223,6 +243,9 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                [(f"beat{b.index}", b.narration) for b in brief.beats]
     cues = ([brief.beats[0].visual] if brief.hook else []) + \
            [b.visual for b in brief.beats]
+    # Exact real-photo queries per segment (see Beat.photos), aligned with cues.
+    photo_lists = ([brief.hook_photos] if brief.hook else []) + \
+                  [b.photos for b in brief.beats]
 
     parts: list[Path] = []
     renders: list[BeatRender] = []
@@ -233,6 +256,27 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
     used_clip_ids = broll.Claims(state.get('_used_clip_ids', []))
     cursor = 0.0
     found_count = 0
+
+    # Narrate every uncached segment CONCURRENTLY before the visual loop.
+    # Narration (LLM markup, TTS per sentence, the STT timing pass) is all
+    # network wait and was done one segment at a time, interleaved with the
+    # visual work that does not depend on it. Three workers stays inside the
+    # Groq and Deepgram per-minute limits; voice.narrate never raises (it
+    # falls back to edge-tts), and a failed prefetch is simply redone inline.
+    narr_cache: dict[str, object] = {}
+    pending = [(slug, text) for slug, text in segments
+               if not (resume and (work / f"{slug}.mp4").exists() and state.get(slug))]
+    if pending:
+        def _narr(item):
+            slug_, text_ = item
+            try:
+                return slug_, voice.narrate(text_, work / "audio", slug_)
+            except Exception:  # noqa: BLE001 - redone inline below
+                return slug_, None
+        with cf.ThreadPoolExecutor(max_workers=NARRATION_WORKERS) as pool:
+            for slug_, n_ in pool.map(_narr, pending):
+                if n_ is not None:
+                    narr_cache[slug_] = n_
 
     for i, ((slug, text), cue) in enumerate(zip(segments, cues)):
         muxed = work / f"{slug}.mp4"
@@ -251,7 +295,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                 print(f"  [{i+1}/{len(segments)}] {slug}: cached ({dur:.1f}s)")
             continue
 
-        narration = voice.narrate(text, work / "audio", slug)
+        narration = narr_cache.get(slug) or voice.narrate(text, work / "audio", slug)
         dur = max(narration.duration_sec, 1.0)
 
         # One beat used to be ONE still held for the whole beat, which on a real
@@ -274,6 +318,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         authored = bool(cue and cue.strip() and cue.strip() != text.strip()[:120])
         cue_list = shots.shot_cues(text, cue, n_shots)
         broll_cues = [cue] * n_shots if authored else cue_list
+        photos = photo_lists[i] if i < len(photo_lists) else []
         shot_files: list[Path] = []
         seen_digests: set[str] = set()
         first_still: Path | None = None
@@ -299,13 +344,27 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                     want_face=(not authored and k % broll.FACE_EVERY_NTH_SHOT == 1),
                     variant=k)
             with cf.ThreadPoolExecutor(max_workers=BROLL_WORKERS) as pool:
-                for k, clip in pool.map(lambda a: _grab(*a), list(enumerate(broll_cues))):
+                todo = [(k, q) for k, q in enumerate(broll_cues) if k >= len(photos)]
+                for k, clip in pool.map(lambda a: _grab(*a), todo):
                     prefetched[k] = clip
 
         for k, shot_cue in enumerate(cue_list):
             shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
 
             clip = prefetched.get(k)
+
+            # A named real photo for this shot wins over everything else.
+            if clip is None and k < len(photos):
+                still, ok = visuals.fetch_exact(
+                    photos[k], work / "img" / f"{slug}_{k:02d}_p.jpg")
+                if ok:
+                    dg = shots.digest(still)
+                    if dg not in seen_digests:
+                        seen_digests.add(dg)
+                        if first_still is None:
+                            first_still, first_ok = still, True
+                        clip = visuals.ken_burns(still, shot_out, seg, size,
+                                                 zoom_in=((i + k) % 2 == 0))
 
             # Generated imagery, when asked for. Built from the BEAT'S `visual`
             # field, which is purpose-written to describe what should be seen,
@@ -408,7 +467,8 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             config.RESOLUTION, margin_frac=0.08)
         if verbose:
             print(f"  captions: {caption_file.name}")
-    _concat(parts, master, work, caption_file, music=pick_music(brief.title))
+    music = pick_music(brief.title)
+    _concat(parts, master, work, caption_file, music=music)
 
     hero = _pick_hero(renders)
 
@@ -418,6 +478,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         beats=renders,
         hero_still=hero,
         real_image_ratio=round(found_count / max(1, len(segments)), 2),
+        music_credit=music_credit(music),
     )
 
 
@@ -521,7 +582,8 @@ def write_manifest(brief: Brief, result: RenderResult, thumb: dict,
 
     payload = {
         "title": brief.title,
-        "description": brief.description,
+        "description": brief.description + (
+            f"\n\n{result.music_credit}" if getattr(result, 'music_credit', '') else ""),
         "hashtags": brief.hashtags,
         "tags": brief.tags,
         "end_screen_followup": brief.end_screen_followup,

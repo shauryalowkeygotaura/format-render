@@ -27,6 +27,10 @@ class Beat:
     narration: str
     visual: str
     seconds: float
+    # Exact Wikimedia Commons queries, one per shot, used BEFORE stock video.
+    # Real photographs of the actual subject (Coast Guard debris photos, NOAA
+    # wreck images) beat any stock clip; stock stays for generic shots only.
+    photos: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +49,7 @@ class Brief:
     tags: list[str] = field(default_factory=list)
     substance: list[dict] = field(default_factory=list)
     end_screen_followup: str = ""
+    hook_photos: list[str] = field(default_factory=list)
     gate_passed: bool = True
     gate_failures: list[str] = field(default_factory=list)
     source: Path | None = None
@@ -72,6 +77,12 @@ def _resolve(ref: str) -> Path:
     raise BriefError(
         f"No brief matching {ref!r}. Looked in {config.BRIEF_DIR}.\n"
         f"Generate one with: python -m formatengine brief <format> --bend 0")
+
+
+def _photo_list(v) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    return [x.strip()[:160] for x in v if isinstance(x, str) and x.strip()][:16]
 
 
 def load_brief(ref: str, *, force: bool = False) -> Brief:
@@ -121,6 +132,7 @@ def load_brief(ref: str, *, force: bool = False) -> Brief:
             narration=narration,
             visual=(b.get("visual") or narration)[:200],
             seconds=float(b.get("seconds") or 0) or 0.0,
+            photos=_photo_list(b.get("photos")),
         ))
     if not beats:
         raise BriefError(f"{path.name} has beats but none carry narration")
@@ -137,6 +149,7 @@ def load_brief(ref: str, *, force: bool = False) -> Brief:
         tags=list(raw.get("tags") or []),
         substance=list(raw.get("substance") or []),
         end_screen_followup=raw.get("end_screen_followup") or "",
+        hook_photos=_photo_list(raw.get("hook_photos")),
         gate_passed=passed,
         gate_failures=failures,
         source=path,

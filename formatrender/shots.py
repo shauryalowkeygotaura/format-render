@@ -143,7 +143,8 @@ def concat(parts: list[Path], out: Path, listfile: Path) -> Path:
         encoding="utf-8")
     proc = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(listfile), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-i", str(listfile), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+         "-pix_fmt", "yuv420p",
          "-an", str(out)],
         capture_output=True, text=True)
     if proc.returncode != 0:
