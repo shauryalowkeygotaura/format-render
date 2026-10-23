@@ -31,6 +31,9 @@ class Beat:
     # Real photographs of the actual subject (Coast Guard debris photos, NOAA
     # wreck images) beat any stock clip; stock stays for generic shots only.
     photos: list[str] = field(default_factory=list)
+    # Designed full-frame cards (email, quote, title, stat), rendered as this
+    # beat's FIRST shots. See cards.py. Dicts, read by kind.
+    cards: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -133,6 +136,7 @@ def load_brief(ref: str, *, force: bool = False) -> Brief:
             visual=(b.get("visual") or narration)[:200],
             seconds=float(b.get("seconds") or 0) or 0.0,
             photos=_photo_list(b.get("photos")),
+            cards=[c for c in (b.get("cards") or []) if isinstance(c, dict)][:8],
         ))
     if not beats:
         raise BriefError(f"{path.name} has beats but none carry narration")

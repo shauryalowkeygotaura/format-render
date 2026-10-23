@@ -20,7 +20,7 @@ from pathlib import Path
 
 import concurrent.futures as cf
 
-from . import broll, captions, config, imagegen, shots, visuals, voice
+from . import broll, captions, cards, config, imagegen, shots, visuals, voice
 from .brief import Brief
 
 
@@ -246,6 +246,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
     # Exact real-photo queries per segment (see Beat.photos), aligned with cues.
     photo_lists = ([brief.hook_photos] if brief.hook else []) + \
                   [b.photos for b in brief.beats]
+    card_lists = ([[]] if brief.hook else []) + [b.cards for b in brief.beats]
 
     parts: list[Path] = []
     renders: list[BeatRender] = []
@@ -319,6 +320,14 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
         cue_list = shots.shot_cues(text, cue, n_shots)
         broll_cues = [cue] * n_shots if authored else cue_list
         photos = photo_lists[i] if i < len(photo_lists) else []
+        card_specs = card_lists[i] if i < len(card_lists) else []
+        # Designed cards first, then named real photos, then stock. Never more
+        # cards+photos than the beat has shots for.
+        card_specs = card_specs[:n_shots]
+        photos = photos[:max(0, n_shots - len(card_specs))]
+        card_pngs = (cards.render_cards(card_specs, work / "cards", slug)
+                     if card_specs else [])
+        designed = len(card_specs) + len(photos)
         shot_files: list[Path] = []
         seen_digests: set[str] = set()
         first_still: Path | None = None
@@ -344,7 +353,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                     want_face=(not authored and k % broll.FACE_EVERY_NTH_SHOT == 1),
                     variant=k)
             with cf.ThreadPoolExecutor(max_workers=BROLL_WORKERS) as pool:
-                todo = [(k, q) for k, q in enumerate(broll_cues) if k >= len(photos)]
+                todo = [(k, q) for k, q in enumerate(broll_cues) if k >= designed]
                 for k, clip in pool.map(lambda a: _grab(*a), todo):
                     prefetched[k] = clip
 
@@ -353,10 +362,17 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
 
             clip = prefetched.get(k)
 
-            # A named real photo for this shot wins over everything else.
-            if clip is None and k < len(photos):
+            # A designed card for this shot wins over everything else.
+            if clip is None and k < len(card_pngs) and card_pngs[k] is not None:
+                clip = visuals.ken_burns(card_pngs[k], shot_out, seg, size,
+                                         zoom_in=True)
+                if first_still is None:
+                    first_still, first_ok = card_pngs[k], True
+            # Then a named real photo.
+            pk = k - len(card_specs)
+            if clip is None and 0 <= pk < len(photos):
                 still, ok = visuals.fetch_exact(
-                    photos[k], work / "img" / f"{slug}_{k:02d}_p.jpg")
+                    photos[pk], work / "img" / f"{slug}_{k:02d}_p.jpg")
                 if ok:
                     dg = shots.digest(still)
                     if dg not in seen_digests:
@@ -462,9 +478,18 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
     all_words = [wt for b in renders for wt in b.word_timings]
     caption_file = None
     if all_words:
+        # Emphasis words come from paralang's markup (`*word*`), saved beside
+        # each segment's audio by paced.py. They pop on screen as the word lands.
+        pops: set[str] = set()
+        for marked in (work / "audio").glob("*.marked.txt"):
+            try:
+                pops.update(re.findall(r"\*([^*\n]+)\*", marked.read_text(encoding="utf-8")))
+            except OSError:
+                pass
+        pops = {w for p_ in pops for w in p_.split()}
         caption_file = captions.build(
             all_words, 0.0, cursor, work / "master.ass",
-            config.RESOLUTION, margin_frac=0.08)
+            config.RESOLUTION, margin_frac=0.08, pops=pops)
         if verbose:
             print(f"  captions: {caption_file.name}")
     music = pick_music(brief.title)

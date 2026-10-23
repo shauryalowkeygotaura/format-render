@@ -109,8 +109,21 @@ def chunk_words(words: list[tuple[str, float, float]]) -> list[list[tuple[str, f
     return chunks
 
 
+def _norm_word(w: str) -> str:
+    return "".join(ch for ch in w.lower() if ch.isalnum())
+
+
+# Kinetic emphasis pop: big centred word, scale bounce, quick fade. Measured on
+# the reference anime channel (1.7 s/shot): key words land as large on-screen
+# type over the footage ('HOW HARD WOULD IT BE TO', 'MOST'). Ours had none.
+POP_SECONDS = 0.85
+_POP_ANIM = (r"{\fscx55\fscy55\t(0,110,\fscx118\fscy118)"
+             r"\t(110,210,\fscx100\fscy100)\fad(0,160)}")
+
+
 def build(word_timings, seg_start: float, seg_end: float, out: Path,
-          size: tuple[int, int], *, margin_frac: float = 0.14) -> Path:
+          size: tuple[int, int], *, margin_frac: float = 0.14,
+          pops: set[str] | None = None) -> Path:
     """Write an ASS caption track for [seg_start, seg_end), timed to the clip.
 
     `word_timings` arrive on the MASTER timeline; output is clip-relative.
@@ -133,7 +146,9 @@ def build(word_timings, seg_start: float, seg_end: float, out: Path,
         "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
         "MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Cap,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
-        f"-1,0,0,0,100,100,0,0,1,{max(3, font_size // 12)},2,2,70,70,{margin_v},1\n\n"
+        f"-1,0,0,0,100,100,0,0,1,{max(3, font_size // 12)},2,2,70,70,{margin_v},1\n"
+        f"Style: Pop,Arial Black,{int(h * 0.11)},&H0000E1FF,&H000000FF,&H00000000,&H90000000,"
+        f"-1,0,0,0,100,100,2,0,1,{max(6, int(h * 0.009))},4,5,60,60,0,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
@@ -148,6 +163,14 @@ def build(word_timings, seg_start: float, seg_end: float, out: Path,
         text = " ".join(c[0] for c in chunk).replace("{", "(").replace("}", ")")
         lines.append(f"Dialogue: 0,{_ts(chunk[0][1])},{_ts(chunk[-1][2])},"
                      f"Cap,,0,0,0,,{text}")
+
+    if pops:
+        wanted = {_norm_word(w) for w in pops if _norm_word(w)}
+        for word, st, _en in windowed:
+            if _norm_word(word) in wanted:
+                shown = word.strip(".,!?;:'\"").upper().replace("{", "(").replace("}", ")")
+                lines.append(f"Dialogue: 1,{_ts(st)},{_ts(st + POP_SECONDS)},"
+                             f"Pop,,0,0,0,,{_POP_ANIM}{shown}")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     # No Dialogue lines means an empty track; callers check size before burning
