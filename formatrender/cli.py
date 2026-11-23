@@ -215,6 +215,8 @@ def cmd_render(args) -> int:
 
     result = compose.compose(b, spec, work, resume=not args.fresh,
                              use_broll=args.broll,
+                             drawn=getattr(args, 'drawn', 'stock'),
+                             drawn_style=getattr(args, 'drawn_style', 'auto'),
                              use_gen=getattr(args, 'gen', False),
                              tone=getattr(args, 'tone', ''))
 
@@ -372,6 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--shorts", type=int, default=4,
                    help="max vertical shorts to cut from the master")
     r.add_argument("--no-shorts", action="store_true", help="master only")
+    r.add_argument("--drawn", choices=("stock", "mix", "drawn"), default="mix",
+                   help="code-drawn paper/sketch cards: mix (default) = Groq picks per beat where a card "
+                        "says it better and it replaces gradient fallbacks; drawn = every beat; stock = off")
+    r.add_argument("--drawn-style", dest="drawn_style", choices=("auto", "papercut", "sketch"), default="auto")
     r.add_argument("--broll", action="store_true",
                    help="try stock video clips before Ken-Burns stills "
                         "(needs PIXABAY_API_KEY or PEXELS_API_KEY)")

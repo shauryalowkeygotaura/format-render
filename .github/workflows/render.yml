@@ -1,0 +1,134 @@
+# Renders a format-engine brief to a 16:9 video + thumbnail + shorts on GitHub's machine.
+# Nothing is published: the outputs come back as a downloadable artifact (publish stays manual).
+#
+# Needs (repo Settings -> Secrets -> Actions):
+#   FORMAT_ENGINE_TOKEN  fine-grained PAT, read-only Contents on shauryalowkeygotaura/format-engine
+#                        (briefs live there; this repo is useless without them)
+#   GROQ_API_KEY         drawn-card mix + paced captions (falls back to keyword rules without it)
+#   PEXELS_API_KEY       optional stock video b-roll
+# Missing FORMAT_ENGINE_TOKEN -> the scheduled run skips cleanly.
+# Private repo: each render uses Actions minutes from the monthly private-repo allowance.
+name: render
+
+on:
+  # Tue + Fri 13:00 UTC = 8-9 AM ET / 18:30 IST: the video is ready before the US 12-4 PM ET
+  # long-form window. Twice a week fits the private-repo minute budget (~1 h per render).
+  schedule:
+    - cron: "0 13 * * 2,5"
+  workflow_dispatch:
+    inputs:
+      brief:
+        description: "Brief stem (empty = next unrendered brief that passed the gate)"
+        required: false
+        default: ""
+      drawn:
+        description: "Drawn cards: mix (Groq picks per beat), drawn (every beat), stock (off)"
+        type: choice
+        options: [mix, drawn, stock]
+        default: mix
+      drawn_style:
+        description: "Look of drawn cards"
+        type: choice
+        options: [auto, papercut, sketch]
+        default: auto
+
+concurrency:
+  group: format-render
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # records rendered briefs in rendered.txt
+
+env:
+  IN_DRAWN: ${{ inputs.drawn || 'mix' }}
+  IN_STYLE: ${{ inputs.drawn_style || 'auto' }}
+  FORMAT_ENGINE_HOME: ${{ github.workspace }}/format-engine
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secrets present?
+        env:
+          HAS_ENGINE: ${{ secrets.FORMAT_ENGINE_TOKEN != '' }}
+        run: |
+          if [ "$HAS_ENGINE" != "true" ]; then
+            echo "::notice::FORMAT_ENGINE_TOKEN not set yet: render skipped"; echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Briefs (format-engine, private)
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: shauryalowkeygotaura/format-engine
+          token: ${{ secrets.FORMAT_ENGINE_TOKEN }}
+          path: format-engine
+
+      - uses: actions/setup-python@v5
+        if: env.SKIP != 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ffmpeg, deps, Chromium (designed cards are HTML screenshots)
+        if: env.SKIP != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install -q -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      # Whitelisted before it touches a command line; inputs arrive as env vars, never as ${{ }}.
+      - name: Pick brief
+        if: env.SKIP != 'true'
+        env:
+          IN_BRIEF: ${{ inputs.brief }}
+        run: |
+          set -euo pipefail
+          [[ "$IN_DRAWN" =~ ^(mix|drawn|stock)$ ]] || { echo "::error::bad drawn"; exit 1; }
+          [[ "$IN_STYLE" =~ ^(auto|papercut|sketch)$ ]] || { echo "::error::bad drawn_style"; exit 1; }
+          BRIEF="${IN_BRIEF:-$(python scripts/next_brief.py)}"
+          if [ -z "$BRIEF" ]; then
+            echo "::notice::no unrendered brief that passed the gate"; echo "SKIP=true" >> "$GITHUB_ENV"; exit 0
+          fi
+          [[ "$BRIEF" =~ ^[a-z0-9][a-z0-9-]{0,119}$ ]] || { echo "::error::brief must be a-z 0-9 -"; exit 1; }
+          echo "BRIEF=$BRIEF" >> "$GITHUB_ENV"
+          echo "rendering $BRIEF"
+
+      - name: Render
+        if: env.SKIP != 'true'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          set -euo pipefail
+          extra=()
+          [ -n "$PEXELS_API_KEY" ] && extra+=(--broll)
+          [ -n "$GROQ_API_KEY" ] || echo "::warning::GROQ_API_KEY missing: drawn cards use keyword rules"
+          python -m formatrender render "$BRIEF" --drawn "$IN_DRAWN" --drawn-style "$IN_STYLE" "${extra[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.SKIP != 'true'
+        with:
+          name: ${{ env.BRIEF }}-${{ github.run_number }}
+          path: |
+            output/**/*.mp4
+            output/**/*.jpg
+            output/**/*.png
+            output/**/*.json
+            !output/**/work/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Record rendered brief
+        if: success() && env.SKIP != 'true'
+        run: |
+          set -euo pipefail
+          echo "$BRIEF" >> rendered.txt
+          git add rendered.txt
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "render: $BRIEF (run ${{ github.run_number }})"
+          git push -q

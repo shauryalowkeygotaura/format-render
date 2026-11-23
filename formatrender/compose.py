@@ -20,6 +20,8 @@ from pathlib import Path
 
 import concurrent.futures as cf
 
+import drawn_scenes as ds  # vendored at repo root, see drawn_scenes/VENDORED.txt
+
 from . import broll, captions, cards, config, imagegen, shots, visuals, voice
 from .brief import Brief
 
@@ -225,7 +227,10 @@ def _pick_hero(renders: list[BeatRender]) -> Path | None:
 
 def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             use_gen: bool = False, tone: str = "",
-            verbose: bool = True, use_broll: bool = False) -> RenderResult:
+            verbose: bool = True, use_broll: bool = False,
+            drawn: str = "stock", drawn_style: str = "auto") -> RenderResult:
+    """drawn: stock (photos/footage only) | mix (Groq picks, per beat, whether a code-drawn
+    paper/sketch card says it better; also replaces gradient fallbacks) | drawn (a card every beat)."""
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     state_path = work / "beats.json"
@@ -278,6 +283,29 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             for slug_, n_ in pool.map(_narr, pending):
                 if n_ is not None:
                     narr_cache[slug_] = n_
+
+    # Code-drawn cards (drawn_scenes/, shared with vtuber-render & co): one Groq call over all beats.
+    drawn = drawn if drawn in ("stock", "mix", "drawn") else "stock"
+    drawn_specs: list[dict] = []
+    drawn_beats: set[int] = set()
+    if drawn != "stock":
+        drawn_specs = ds.plan([t for _, t in segments], decide=(drawn == "mix"),
+                              video="a 16:9 documentary-style explainer video",
+                              stock="a real photograph or stock video of the subject")
+        drawn_beats = set(range(len(segments))) if drawn == "drawn" else ds.decide(drawn_specs)
+        if verbose:
+            print(f"  drawn cards ({drawn}): beats {sorted(drawn_beats)}")
+    drawn_look = ds.choose_style(drawn_style, brief.title)
+
+    def _draw(i: int, k: int, seconds: float) -> Path | None:
+        if not drawn_specs:
+            return None
+        try:
+            return ds.render(drawn_look, drawn_specs[i], seconds, work / "drawn", size=size,
+                             seed=7 + i * 31 + k)
+        except (RuntimeError, ValueError) as e:
+            print(f"  drawn card failed (beat {i}, shot {k}): {e}")
+            return None
 
     for i, ((slug, text), cue) in enumerate(zip(segments, cues)):
         muxed = work / f"{slug}.mp4"
@@ -361,6 +389,9 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             shot_out = work / "shots" / f"{slug}_{k:02d}.mp4"
 
             clip = prefetched.get(k)
+            # A beat Groq marked "drawn" gets its card in the first slot no designed card/photo owns.
+            if i in drawn_beats and k == designed:
+                clip = _draw(i, k, seg) or clip
 
             # A designed card for this shot wins over everything else.
             if clip is None and k < len(card_pngs) and card_pngs[k] is not None:
@@ -399,6 +430,12 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,
                     subject=brief.topic, palette=palette)
+                if not shot_ok and drawn != "stock":
+                    # No real photo: a drawn card carries the line, a gradient carries nothing.
+                    card = _draw(i, k, seg)
+                    if card is not None:
+                        shot_files.append(card)
+                        continue
                 # Repeating a picture INSIDE one beat looks worse than the beat
                 # having fewer shots, and Commons returns the same file for
                 # related queries often enough that this fires in practice.
