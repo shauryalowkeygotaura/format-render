@@ -1,18 +1,15 @@
 # Renders a format-engine brief to a 16:9 video + thumbnail + shorts on GitHub's machine.
 # Nothing is published: the outputs come back as a downloadable artifact (publish stays manual).
 #
-# Needs (repo Settings -> Secrets -> Actions):
-#   FORMAT_ENGINE_TOKEN  fine-grained PAT, read-only Contents on shauryalowkeygotaura/format-engine
-#                        (briefs live there; this repo is useless without them)
-#   GROQ_API_KEY         drawn-card mix + paced captions (falls back to keyword rules without it)
-#   PEXELS_API_KEY       optional stock video b-roll
-# Missing FORMAT_ENGINE_TOKEN -> the scheduled run skips cleanly.
-# Private repo: each render uses Actions minutes from the monthly private-repo allowance.
+# Briefs come from the public format-engine repo. Secrets (copied from Doppler):
+#   GROQ_API_KEYS / GROQ_API_KEY / GROQ_API_KEY_2  key pool for the drawn-card mix + paced captions
+#   PEXELS_API_KEY                                 stock video b-roll
+# Public repo: Actions minutes are unlimited.
 name: render
 
 on:
   # Tue + Fri 13:00 UTC = 8-9 AM ET / 18:30 IST: the video is ready before the US 12-4 PM ET
-  # long-form window. Twice a week fits the private-repo minute budget (~1 h per render).
+  # long-form window. Twice a week matches the brief supply from format-engine.
   schedule:
     - cron: "0 13 * * 2,5"
   workflow_dispatch:
@@ -51,20 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Secrets present?
-        env:
-          HAS_ENGINE: ${{ secrets.FORMAT_ENGINE_TOKEN != '' }}
-        run: |
-          if [ "$HAS_ENGINE" != "true" ]; then
-            echo "::notice::FORMAT_ENGINE_TOKEN not set yet: render skipped"; echo "SKIP=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Briefs (format-engine, private)
-        if: env.SKIP != 'true'
+      - name: Briefs (format-engine)
         uses: actions/checkout@v4
         with:
           repository: shauryalowkeygotaura/format-engine
-          token: ${{ secrets.FORMAT_ENGINE_TOKEN }}
           path: format-engine
 
       - uses: actions/setup-python@v5
@@ -102,12 +89,14 @@ jobs:
         if: env.SKIP != 'true'
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           set -euo pipefail
           extra=()
           [ -n "$PEXELS_API_KEY" ] && extra+=(--broll)
-          [ -n "$GROQ_API_KEY" ] || echo "::warning::GROQ_API_KEY missing: drawn cards use keyword rules"
+          [ -n "$GROQ_API_KEY$GROQ_API_KEYS" ] || echo "::warning::GROQ_API_KEY missing: drawn cards use keyword rules"
           python -m formatrender render "$BRIEF" --drawn "$IN_DRAWN" --drawn-style "$IN_STYLE" "${extra[@]}"
 
       - uses: actions/upload-artifact@v4
