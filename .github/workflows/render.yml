@@ -62,6 +62,7 @@ jobs:
 
       - name: Install ffmpeg, deps, Chromium (designed cards are HTML screenshots)
         if: env.SKIP != 'true'
+        timeout-minutes: 20   # a slow Ubuntu mirror once hung this for 40+ min; fail fast instead
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
