@@ -429,7 +429,10 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             if clip is None:
                 still, shot_ok = visuals.fetch_still(
                     shot_cue, work / "img" / f"{slug}_{k:02d}.jpg", size,
-                    subject=brief.topic, palette=palette)
+                    subject=brief.topic, palette=palette,
+                    # mix/drawn: judge the Commons pick too; off-topic -> drawn card below
+                    accept=(None if drawn == "stock" else
+                            (lambda url, q: broll.still_is_relevant(url, text, brief.topic))))
                 if not shot_ok and drawn != "stock":
                     # No real photo: a drawn card carries the line, a gradient carries nothing.
                     card = _draw(i, k, seg)

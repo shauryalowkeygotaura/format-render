@@ -299,3 +299,11 @@ def test_judge_failure_keeps_clips(monkeypatch):
     broll._JUDGED.clear()
     monkeypatch.setattr(broll, "_judge_batch", lambda *a: None)
     assert broll._relevant("t2", "topic", [("pexels:1", "a")]) is None
+
+
+def test_still_title_and_judge(monkeypatch):
+    assert broll._still_title("https://u/a/b/Kosmos_954_debris%2C_1978.jpg") == "Kosmos 954 debris, 1978"
+    monkeypatch.setattr(broll, "_relevant", lambda term, topic, c: frozenset())
+    assert broll.still_is_relevant("https://u/Book_cover.jpg", "line", "topic") is False
+    monkeypatch.setattr(broll, "_relevant", lambda *a: None)
+    assert broll.still_is_relevant("https://u/x.jpg", "line", "topic") is True

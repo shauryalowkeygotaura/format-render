@@ -118,7 +118,7 @@ def _is_unsafe(url: str) -> bool:
     return bool(_UNSAFE_RE.search(name))
 
 
-def _search(query: str, subject: str | None) -> str | None:
+def _search(query: str, subject: str | None, accept=None) -> str | None:
     """Progressively broader queries until Commons yields something usable.
 
     Every query carries the video's topic as context. A bare entity name is
@@ -156,7 +156,10 @@ def _search(query: str, subject: str | None) -> str | None:
             continue
         seen.add(cand.lower())
         url = _commons_query(cand)
-        if url and not _is_unsafe(url):
+        # accept(url, query): optional relevance judge (compose passes broll.still_is_relevant in
+        # drawn/mix mode). A rejected pick tries the next, broader query instead of shipping a
+        # book cover or a logo; all rejected -> the caller draws a card.
+        if url and not _is_unsafe(url) and (accept is None or accept(url, query)):
             return url
     return None
 
@@ -211,13 +214,13 @@ def fetch_exact(query: str, dest: Path) -> tuple[Path, bool]:
 
 def fetch_still(cue: str, dest: Path, size: tuple[int, int],
                 subject: str | None = None,
-                palette: tuple[str, str] | None = None) -> tuple[Path, bool]:
+                palette: tuple[str, str] | None = None, accept=None) -> tuple[Path, bool]:
     """Resolve a beat's visual cue to a local image. Always returns a path.
 
     `found` is False when the still is the gradient placeholder, which lets the
     caller report honestly how much of the video is real imagery.
     """
-    url = _search(cue, subject)
+    url = _search(cue, subject, accept)
     if url and _download(url, dest):
         return dest, True
     gradient_card(dest, size, palette or ("0x0b0f1a", "0x16233a"))

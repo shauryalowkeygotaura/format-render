@@ -275,10 +275,11 @@ def _judge_batch(term: str, topic: str, cands: list[tuple[str, str]]) -> frozens
         menu = "\n".join(f"{i}: {t or '(untitled)'}" for i, (_, t) in enumerate(cands[:60]))
         raw = drawn_scenes.groq_chat([
             {"role": "system", "content":
-                "You pick stock footage for a documentary. Keep a clip only if a viewer would connect it to "
-                "the search and the video's topic: it shows the subject, its setting, or a scene that plainly "
-                "illustrates it. Reject clips that merely share a word, generic lifestyle scenes (parties, "
-                "nightclubs, people posing, dancing) unless the topic is about them, and anything off-tone. "
+                "You pick stock footage and photos for a documentary. Keep an item only if a viewer would "
+                "connect it to the search and the video's topic: it shows the subject, its setting, or a scene "
+                "that plainly illustrates it. Reject items that merely share a word, generic lifestyle scenes "
+                "(parties, nightclubs, people posing, dancing), book covers, logos, posters, and charts or maps "
+                "about something else, unless the topic is about them, and anything off-tone. "
                 'Reply JSON {"keep": [indexes]}'},
             {"role": "user", "content": f"Topic: {topic}\nSearch: {term}\nClips:\n{menu}"}], 900)
         keep = json.loads(raw).get("keep", [])
@@ -290,6 +291,19 @@ def _judge_batch(term: str, topic: str, cands: list[tuple[str, str]]) -> frozens
         print(f"  broll judge unavailable for {term!r}: {str(e)[:120]}")
         verdict = None
     return verdict
+
+
+def _still_title(url: str) -> str:
+    """Commons file URL -> readable title ('.../Kosmos_954_debris.jpg' -> 'Kosmos 954 debris')."""
+    from urllib.parse import unquote  # noqa: PLC0415
+    name = unquote(url.rsplit("/", 1)[-1])
+    return re.sub(r"[_\s]+", " ", name.rsplit(".", 1)[0]).strip()[:120]
+
+
+def still_is_relevant(url: str, cue: str, topic: str) -> bool:
+    """Judge one Commons pick for a shot. Unjudgeable (Groq down) counts as relevant."""
+    ok = _relevant(cue[:120], topic, [(url, _still_title(url))])
+    return ok is None or url in ok
 
 
 def _search_pexels(term: str, size: tuple[int, int],
