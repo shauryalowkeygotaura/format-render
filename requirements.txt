@@ -19,4 +19,4 @@ requests>=2.31       # Wikimedia Commons, and optional Pixabay/Pexels
 playwright>=1.45     # designed cards (HTML screenshots)
 groq>=0.11           # drawn-card mix (drawn_scenes/) + paced captions
 numpy>=1.26          # drawn_scenes
-opencv-python-headless>=4.9,<5.1   # 5.1 dropped CascadeClassifier (format-engine thumbnail check)
+opencv-python-headless>=4.9,<5   # OpenCV 5 moved CascadeClassifier to contrib (format-engine thumbnail check)
