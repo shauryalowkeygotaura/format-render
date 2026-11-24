@@ -297,12 +297,20 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
             print(f"  drawn cards ({drawn}): beats {sorted(drawn_beats)}")
     drawn_look = ds.choose_style(drawn_style, brief.title)
 
-    def _draw(i: int, k: int, seconds: float) -> Path | None:
+    cards_in_beat: dict[int, int] = {}
+
+    def _draw(i: int, k: int, seconds: float, shot_words: str = "") -> Path | None:
         if not drawn_specs:
             return None
+        # The beat's Groq-picked card is shown once. Further cards in the same beat (photos the
+        # judge rejected) take their headline + icon from that shot's own words, so a beat
+        # never shows one card 17 times (2026-11-24 CI run).
+        n = cards_in_beat.get(i, 0)
+        spec = drawn_specs[i] if n == 0 or not shot_words else ds.fallback_spec(shot_words)
         try:
-            return ds.render(drawn_look, drawn_specs[i], seconds, work / "drawn", size=size,
-                             seed=7 + i * 31 + k)
+            out = ds.render(drawn_look, spec, seconds, work / "drawn", size=size, seed=7 + i * 31 + k)
+            cards_in_beat[i] = n + 1
+            return out
         except (RuntimeError, ValueError) as e:
             print(f"  drawn card failed (beat {i}, shot {k}): {e}")
             return None
@@ -435,7 +443,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                             (lambda url, q: broll.still_is_relevant(url, text, brief.topic))))
                 if not shot_ok and drawn != "stock":
                     # No real photo: a drawn card carries the line, a gradient carries nothing.
-                    card = _draw(i, k, seg)
+                    card = _draw(i, k, seg, shot_words=shot_cue)
                     if card is not None:
                         shot_files.append(card)
                         continue
