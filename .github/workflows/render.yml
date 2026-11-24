@@ -43,7 +43,8 @@ env:
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to a new image (resolute) whose apt mirror crawled and timed out.
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -64,8 +65,12 @@ jobs:
         if: env.SKIP != 'true'
         timeout-minutes: 20   # a slow Ubuntu mirror once hung this for 40+ min; fail fast instead
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          set -euo pipefail
+          # Static ffmpeg/ffprobe (GPL build, includes libass for burned captions) from GitHub, not apt.
+          curl -fsSL -o /tmp/ff.tar.xz             https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1
+          sudo install -m 755 /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          ffmpeg -hide_banner -filters 2>/dev/null | grep -q " ass " || { echo "::error::ffmpeg lacks libass"; exit 1; }
           pip install -q -r requirements.txt
           python -m playwright install --with-deps chromium
 
