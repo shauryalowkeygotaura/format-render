@@ -132,7 +132,7 @@ def test_fetch_clip_forwards_used_ids(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
 
-    def spy(term, size, exclude=frozenset(), offset=0):
+    def spy(term, size, exclude=frozenset(), offset=0, **_kw):
         seen["exclude"] = exclude
         return None
 
@@ -174,7 +174,7 @@ def test_fetch_clip_retries_past_a_dark_clip(monkeypatch, tmp_path):
     monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
     offered = ["pexels:dark", "pexels:good"]
 
-    def search(term, size, exclude=frozenset(), offset=0):
+    def search(term, size, exclude=frozenset(), offset=0, **_kw):
         for cid in offered:
             if cid not in exclude:
                 return f"http://v/{cid}.mp4", cid
@@ -227,7 +227,7 @@ def test_parallel_fetch_yields_distinct_clips(monkeypatch, tmp_path):
     pool_ids = [f"pexels:{i}" for i in range(40)]
     monkeypatch.setattr(broll, "enabled", lambda: {"pexels": True, "pixabay": False})
 
-    def search(term, size, exclude=frozenset(), offset=0):
+    def search(term, size, exclude=frozenset(), offset=0, **_kw):
         free = [c for c in pool_ids if c not in exclude]
         if not free:
             return None
@@ -253,3 +253,28 @@ def test_parallel_fetch_yields_distinct_clips(monkeypatch, tmp_path):
         got = [g for g in ex.map(grab, range(20)) if g is not None]
     assert len(got) == 20, "some parallel fetches returned nothing"
     assert len(claims) == 20, f"expected 20 distinct claims, got {len(claims)}"
+
+
+def test_pexels_drops_clips_groq_calls_off_topic(monkeypatch):
+    """2026-11-24: nightclub footage under 'the invoice totalled Can$6 million'."""
+    monkeypatch.setattr(broll, "_pexels_key", lambda: "k")
+    vids = _videos(11, 22)
+    vids["videos"][0]["url"] = "https://www.pexels.com/video/people-partying-in-a-club-11/"
+    vids["videos"][1]["url"] = "https://www.pexels.com/video/satellite-orbiting-earth-22/"
+    monkeypatch.setattr(broll.requests, "get", lambda *a, **k: _Resp(vids))
+    seen = {}
+
+    def judge(term, topic, cands):
+        seen["titles"] = [t for _, t in cands]
+        return frozenset({"pexels:22"})
+    monkeypatch.setattr(broll, "_relevant", judge)
+    assert broll._search_pexels("soviet satellite", (1920, 1080), topic="Kosmos 954") == \
+        ("http://v/22.mp4", "pexels:22")
+    assert seen["titles"] == ["people partying in a club", "satellite orbiting earth"]
+
+
+def test_pexels_unjudged_keeps_everything(monkeypatch):
+    monkeypatch.setattr(broll, "_pexels_key", lambda: "k")
+    monkeypatch.setattr(broll.requests, "get", lambda *a, **k: _Resp(_videos(11)))
+    monkeypatch.setattr(broll, "_relevant", lambda *a: None)
+    assert broll._search_pexels("x", (1920, 1080), topic="t") == ("http://v/11.mp4", "pexels:11")

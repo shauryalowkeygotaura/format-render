@@ -225,10 +225,62 @@ def _search_pixabay(term: str, size: tuple[int, int],
     return acceptable[offset % len(acceptable)]
 
 
+# ── relevance judge ──────────────────────────────────────────────────────────
+# Keyword search returns clips that only share a word with the cue: a 2026-11-24 CI render put
+# nightclub footage under "the invoice totalled Can$6 million". One Groq call per (term, topic)
+# reads every candidate's title (the Pexels page slug) and keeps only clips a viewer would
+# connect to the line. Rejected -> the shot falls through to a Commons still, then a drawn card.
+# Groq down or no key -> no filtering (the old behaviour), never a failed render.
+_JUDGED: dict[tuple[str, str], frozenset[str] | None] = {}
+_JUDGE_LOCK = threading.Lock()
+
+
+def _slug_title(page_url: str) -> str:
+    slug = (page_url or "").rstrip("/").rsplit("/", 1)[-1]
+    words = slug.split("-")
+    return " ".join(words[:-1] if words and words[-1].isdigit() else words)[:120]
+
+
+def _relevant(term: str, topic: str, cands: list[tuple[str, str]]) -> frozenset[str] | None:
+    """clip_ids worth showing for `term` in a video about `topic`; None = could not judge."""
+    if not cands or os.environ.get("FR_JUDGE", "1") == "0":
+        return None
+    key = (term, topic)
+    with _JUDGE_LOCK:
+        if key in _JUDGED:
+            return _JUDGED[key]
+    verdict: frozenset[str] | None = None
+    try:
+        import json  # noqa: PLC0415
+
+        import drawn_scenes  # noqa: PLC0415  (vendored; its groq_chat rotates the key pool)
+        menu = "\n".join(f"{i}: {t or '(untitled)'}" for i, (_, t) in enumerate(cands[:60]))
+        raw = drawn_scenes.groq_chat([
+            {"role": "system", "content":
+                "You pick stock footage for a documentary. Keep a clip only if a viewer would connect it to "
+                "the search and the video's topic: it shows the subject, its setting, or a scene that plainly "
+                "illustrates it. Reject clips that merely share a word, generic lifestyle scenes (parties, "
+                "nightclubs, people posing, dancing) unless the topic is about them, and anything off-tone. "
+                'Reply JSON {"keep": [indexes]}'},
+            {"role": "user", "content": f"Topic: {topic}\nSearch: {term}\nClips:\n{menu}"}], 900)
+        keep = json.loads(raw).get("keep", [])
+        if isinstance(keep, list):
+            verdict = frozenset(cands[i][0] for i in keep
+                                if isinstance(i, int) and 0 <= i < min(60, len(cands)))
+            print(f"  broll judge: {term!r} kept {len(verdict)}/{min(60, len(cands))}")
+    except Exception as e:  # noqa: BLE001 - judging is a bonus; never fail a render over it
+        print(f"  broll judge unavailable for {term!r}: {str(e)[:120]}")
+        verdict = None
+    with _JUDGE_LOCK:
+        _JUDGED[key] = verdict
+    return verdict
+
+
 def _search_pexels(term: str, size: tuple[int, int],
                    exclude: frozenset[str] = frozenset(),
-                   offset: int = 0) -> tuple[str, str] | None:
-    """(url, clip_id) or None. `exclude` holds clip_ids already used."""
+                   offset: int = 0, topic: str = "") -> tuple[str, str] | None:
+    """(url, clip_id) or None. `exclude` holds clip_ids already used.
+    With `topic`, Groq drops candidates that are off-topic (see _relevant)."""
     key = _pexels_key()
     if not key:
         return None
@@ -282,7 +334,12 @@ def _search_pexels(term: str, size: tuple[int, int],
         usable.sort(key=lambda f: (int(f.get("width", 0) or 0),
                                    abs(int(f.get("fps", 30) or 30) - config.FPS)))
         if usable:
-            acceptable.append((usable[0]["link"], clip_id))
+            acceptable.append((usable[0]["link"], clip_id, _slug_title(vid.get("url", ""))))
+    if topic and acceptable:
+        ok = _relevant(term, topic, [(cid, title) for _, cid, title in acceptable])
+        if ok is not None:
+            acceptable = [a for a in acceptable if a[1] in ok]
+    acceptable = [(link, cid) for link, cid, *_ in acceptable]
     if not acceptable:
         return None
     # Rotate by offset so concurrent shots do not all grab the same first hit.
@@ -536,7 +593,7 @@ def fetch_clip(cue: str, dest: Path, duration: float, size: tuple[int, int],
         if flags["pixabay"]:
             found = _search_pixabay(term, size, seen, variant)
         if not found and flags["pexels"]:
-            found = _search_pexels(term, size, seen, variant)
+            found = _search_pexels(term, size, seen, variant, topic=topic)
         if not found:
             break
         url, clip_id = found
