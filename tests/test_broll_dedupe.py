@@ -278,3 +278,24 @@ def test_pexels_unjudged_keeps_everything(monkeypatch):
     monkeypatch.setattr(broll.requests, "get", lambda *a, **k: _Resp(_videos(11)))
     monkeypatch.setattr(broll, "_relevant", lambda *a: None)
     assert broll._search_pexels("x", (1920, 1080), topic="t") == ("http://v/11.mp4", "pexels:11")
+
+
+def test_judge_remembers_per_clip_and_only_asks_about_new_ones(monkeypatch):
+    broll._JUDGED.clear()
+    asked = []
+
+    def batch(term, topic, cands):
+        asked.append([c for c, _ in cands])
+        return frozenset(c for c, _ in cands if c.endswith("1"))
+    monkeypatch.setattr(broll, "_judge_batch", batch)
+    page1 = [("pexels:11", "a"), ("pexels:12", "b")]
+    page2 = [("pexels:12", "b"), ("pexels:21", "c")]
+    assert broll._relevant("t", "topic", page1) == frozenset({"pexels:11"})
+    assert broll._relevant("t", "topic", page2) == frozenset({"pexels:21"})   # page 2 judged on its own
+    assert asked == [["pexels:11", "pexels:12"], ["pexels:21"]]               # 12 never re-asked
+
+
+def test_judge_failure_keeps_clips(monkeypatch):
+    broll._JUDGED.clear()
+    monkeypatch.setattr(broll, "_judge_batch", lambda *a: None)
+    assert broll._relevant("t2", "topic", [("pexels:1", "a")]) is None

@@ -231,7 +231,8 @@ def _search_pixabay(term: str, size: tuple[int, int],
 # reads every candidate's title (the Pexels page slug) and keeps only clips a viewer would
 # connect to the line. Rejected -> the shot falls through to a Commons still, then a drawn card.
 # Groq down or no key -> no filtering (the old behaviour), never a failed render.
-_JUDGED: dict[tuple[str, str], frozenset[str] | None] = {}
+_JUDGED: dict[tuple[str, str], dict[str, bool]] = {}   # (term, topic) -> {clip_id: keep?}
+_KEY_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _JUDGE_LOCK = threading.Lock()
 
 
@@ -247,8 +248,25 @@ def _relevant(term: str, topic: str, cands: list[tuple[str, str]]) -> frozenset[
         return None
     key = (term, topic)
     with _JUDGE_LOCK:
-        if key in _JUDGED:
-            return _JUDGED[key]
+        lock = _KEY_LOCKS.setdefault(key, threading.Lock())
+    # One judging call per (term, topic) at a time: parallel shot workers wait instead of all
+    # paying for the same call. Verdicts are stored PER CLIP, because workers read different
+    # result pages, and a verdict about page 1 must not filter page 2.
+    with lock:
+        known = _JUDGED.setdefault(key, {})
+        todo = [(cid, t) for cid, t in cands if cid not in known][:60]
+        if todo:
+            got = _judge_batch(term, topic, todo)
+            if got is not None:
+                for cid, _ in todo:
+                    known[cid] = cid in got
+        if not known:
+            return None
+        # unjudged (Groq failed) clips stay eligible: judging is a filter, never a blocker
+        return frozenset(cid for cid, _ in cands if known.get(cid, True))
+
+
+def _judge_batch(term: str, topic: str, cands: list[tuple[str, str]]) -> frozenset[str] | None:
     verdict: frozenset[str] | None = None
     try:
         import json  # noqa: PLC0415
@@ -271,8 +289,6 @@ def _relevant(term: str, topic: str, cands: list[tuple[str, str]]) -> frozenset[
     except Exception as e:  # noqa: BLE001 - judging is a bonus; never fail a render over it
         print(f"  broll judge unavailable for {term!r}: {str(e)[:120]}")
         verdict = None
-    with _JUDGE_LOCK:
-        _JUDGED[key] = verdict
     return verdict
 
 
