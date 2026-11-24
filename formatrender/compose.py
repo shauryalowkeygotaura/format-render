@@ -298,15 +298,23 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
     drawn_look = ds.choose_style(drawn_style, brief.title)
 
     cards_in_beat: dict[int, int] = {}
+    shot_specs: dict[int, list[dict]] = {}
 
-    def _draw(i: int, k: int, seconds: float, shot_words: str = "") -> Path | None:
+    def _draw(i: int, k: int, seconds: float, shot_lines: list[str] | None = None) -> Path | None:
         if not drawn_specs:
             return None
         # The beat's Groq-picked card is shown once. Further cards in the same beat (photos the
-        # judge rejected) take their headline + icon from that shot's own words, so a beat
-        # never shows one card 17 times (2026-11-24 CI run).
+        # judge rejected) get their own headline + icon: ONE Groq call plans every shot of the
+        # beat on first need (keyword rules if Groq is down). Never one card 17 times, never
+        # keyword-salad headlines ("sweating buying") - both seen on 2026-11-24 CI runs.
         n = cards_in_beat.get(i, 0)
-        spec = drawn_specs[i] if n == 0 or not shot_words else ds.fallback_spec(shot_words)
+        if n == 0 or not shot_lines or k >= len(shot_lines):
+            spec = drawn_specs[i]
+        else:
+            if i not in shot_specs:
+                shot_specs[i] = ds.plan([f"{c}  (from: {segments[i][1][:160]})" for c in shot_lines],
+                                        video="a 16:9 documentary-style explainer video")
+            spec = shot_specs[i][k]
         try:
             out = ds.render(drawn_look, spec, seconds, work / "drawn", size=size, seed=7 + i * 31 + k)
             cards_in_beat[i] = n + 1
@@ -443,7 +451,7 @@ def compose(brief: Brief, spec: dict, work: Path, *, resume: bool = True,
                             (lambda url, q: broll.still_is_relevant(url, text, brief.topic))))
                 if not shot_ok and drawn != "stock":
                     # No real photo: a drawn card carries the line, a gradient carries nothing.
-                    card = _draw(i, k, seg, shot_words=shot_cue)
+                    card = _draw(i, k, seg, shot_lines=cue_list)
                     if card is not None:
                         shot_files.append(card)
                         continue
