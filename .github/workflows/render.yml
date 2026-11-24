@@ -26,7 +26,7 @@ on:
       drawn_style:
         description: "Look of drawn cards"
         type: choice
-        options: [auto, papercut, sketch]
+        options: [auto, papercut, sketch, anatomy]
         default: auto
 
 concurrency:
@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$IN_DRAWN" =~ ^(mix|drawn|stock)$ ]] || { echo "::error::bad drawn"; exit 1; }
-          [[ "$IN_STYLE" =~ ^(auto|papercut|sketch)$ ]] || { echo "::error::bad drawn_style"; exit 1; }
+          [[ "$IN_STYLE" =~ ^(auto|papercut|sketch|anatomy)$ ]] || { echo "::error::bad drawn_style"; exit 1; }
           BRIEF="${IN_BRIEF:-$(python scripts/next_brief.py)}"
           if [ -z "$BRIEF" ]; then
             echo "::notice::no unrendered brief that passed the gate"; echo "SKIP=true" >> "$GITHUB_ENV"; exit 0

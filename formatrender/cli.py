@@ -377,7 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--drawn", choices=("stock", "mix", "drawn"), default="mix",
                    help="code-drawn paper/sketch cards: mix (default) = Groq picks per beat where a card "
                         "says it better and it replaces gradient fallbacks; drawn = every beat; stock = off")
-    r.add_argument("--drawn-style", dest="drawn_style", choices=("auto", "papercut", "sketch"), default="auto")
+    r.add_argument("--drawn-style", dest="drawn_style", choices=("auto", "papercut", "sketch", "anatomy"), default="auto")
     r.add_argument("--broll", action="store_true",
                    help="try stock video clips before Ken-Burns stills "
                         "(needs PIXABAY_API_KEY or PEXELS_API_KEY)")
